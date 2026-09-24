@@ -1,0 +1,51 @@
+# Fixed music categories (spec 63). A category = a region/query in Music Space.
+# Only dimensions derivable from local audio analysis are used; terms like external
+# "抖音热门" or a platform genre tag are intentionally NOT here (spec 33, principle 1).
+#
+# query values are target percentiles in [0,1] within the local library.
+# hard_filter conditions must hold; soft ranking uses |percentile - target|.
+categories:
+  - id: high_energy
+    name: 高能量
+    hard_filter: {}
+    query:
+      energy: 0.85
+      rhythm_intensity: 0.80
+      drum_energy: 0.75
+
+  - id: calm_low_stimulation
+    name: 低刺激 / 平静
+    hard_filter: {}
+    query:
+      energy: 0.15
+      rhythm_intensity: 0.20
+      brightness: 0.25
+
+  - id: percussive_rhythmic
+    name: 强节奏
+    hard_filter: {}
+    query:
+      rhythm_intensity: 0.85
+      danceability: 0.80
+      tempo: 0.80
+
+  - id: bright_timbre
+    name: 明亮音色
+    hard_filter: {}
+    query:
+      brightness: 0.85
+
+  - id: high_female_vocal
+    name: 极致高音女声
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_pitch_mean: 0.85
+      vocal_pitch_range: 0.80
+      vocal_intensity: 0.75
+
+  - id: deep_low_vocal
+    name: 低沉人声
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_pitch_mean: 0.20
+      energy: 0.35

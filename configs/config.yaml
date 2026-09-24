@@ -1,0 +1,67 @@
+# Global configuration for the local music MIR recommender (Phase 1 MVP).
+# All thresholds/weights are config-driven; nothing core should be hard-coded.
+
+audio:
+  sample_rate: 44100
+  mono: true
+  # Bounded analysis window (seconds) per track: 0 = analyse the whole file.
+  # Features are still estimated values; window is centred on the loudest region
+  # so chorus/structure stay representative. Full duration is always preserved.
+  max_analysis_seconds: 45
+  # Normalized intermediate format written under data/normalized_audio
+  normalized_dir: data/normalized_audio
+  # Accepted source extensions
+  extensions: [".mp3", ".wav"]
+
+paths:
+  sqlite_dir: data/sqlite
+  db_file: data/sqlite/music.db
+  faiss_dir: data/faiss
+  logs_dir: logs
+
+embedding:
+  # Phase 1 placeholder embedder: librosa statistical features -> PCA.
+  # Swap by implementing the AudioEmbedder interface (see embedding/base.py).
+  backend: librosa_pca
+  pca_components: 24
+  # Persist fitted PCA + feature scaler for reproducibility.
+  model_store: data/faiss/embedding_pipeline.joblib
+
+vector_store:
+  index_file: faiss_index.bin
+  track_ids_file: track_ids.json
+  embedding_model_file: embedding_model.txt
+  embedding_dim_file: embedding_dimension.txt
+
+retrieval:
+  faiss_top_k: 200
+
+# Dynamic Feed / interest model (spec 35-41, 65-66). All tunable, nothing hard-coded.
+feed:
+  # Blend of interest scopes: CurrentInterest = l1*short + l2*medium + l3*long  (l1>l2>l3)
+  scope_lambda: { short: 0.6, medium: 0.3, long: 0.1 }
+  # Time windows (seconds) used to bucket events into scopes.
+  scope_windows: { short: 3600, medium: 86400, long: 2592000 }
+  # Per-event base weight (sign matters) and decay constant tau (seconds).
+  events:
+    like:     { base_weight:  1.00, tau: 604800 }
+    complete: { base_weight:  0.60, tau: 259200 }
+    replay:   { base_weight:  0.80, tau: 259200 }
+    play:     { base_weight:  0.30, tau: 86400 }
+    partial:  { base_weight:  0.10, tau: 21600 }
+    skip:     { base_weight: -0.50, tau: 21600 }
+    dislike:  { base_weight: -1.20, tau: 604800 }
+    impression: { base_weight: 0.0, tau: 3600 }
+  # Candidate ranking term weights (spec 39): preference + similarity + novelty + diversity.
+  ranking_weights: { preference: 0.55, similarity: 0.20, novelty: 0.15, diversity: 0.10 }
+  recent_history_window: 20     # exclude/dampen the last N played tracks
+  cold_start:
+    strategy: diverse           # no behaviour yet -> diverse sample, NOT external popularity
+    exploration: 0.3
+
+logging:
+  level: INFO
+  pipeline_log: logs/pipeline.log
+  errors_log: logs/errors.log
+
+feature_version: "v1"

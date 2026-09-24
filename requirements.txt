@@ -1,0 +1,13 @@
+# Local Music MIR Recommendation System — Phase 1 MVP
+# Validated against Python 3.12 (uv-managed). Python 3.14 has no wheels for this stack.
+numpy<2
+scipy
+librosa
+soundfile
+scikit-learn
+faiss-cpu
+fastapi
+uvicorn[standard]
+pydantic
+pyyaml
+ffmpeg-python

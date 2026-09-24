@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music-recommender"
+version = "0.1.0"
+description = "Offline local-audio MIR feature extraction and content-driven recommendation engine (Music Space)."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy<2",
+    "scipy",
+    "librosa",
+    "soundfile",
+    "scikit-learn",
+    "faiss-cpu",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pyyaml",
+    "ffmpeg-python",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+music-recommender = "music_recommender.cli:main"

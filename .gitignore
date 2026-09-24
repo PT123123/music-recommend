@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Generated data / caches
+data/normalized_audio/
+data/sqlite/
+data/faiss/
+data/test_music/
+logs/
+
+# Quarantined old DB/index copies (contain absolute local paths)
+.quarantine*/
+
+# OS
+Thumbs.db
+.DS_Store

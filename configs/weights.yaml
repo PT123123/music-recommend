@@ -1,0 +1,21 @@
+# Recommendation scoring weights (spec section 28 / 62).
+# TotalScore = sum(weight_group * group_similarity). Each *_similarity is normalized to [0, 1].
+# These are a starting point and MUST be modifiable at runtime.
+
+# Phase 1 MVP only computes the groups marked "active: true".
+# Inactive groups are ignored by the ranker until their features exist (later phases).
+weights:
+  embedding:      { value: 0.30, active: true  }   # PCA embedding cosine similarity
+  rhythm:         { value: 0.10, active: true  }   # bpm / onset_density / beat_consistency
+  timbre:         { value: 0.10, active: true  }   # spectral + mfcc stats
+  energy:         { value: 0.10, active: true  }   # rms / dynamic_range
+  harmony:        { value: 0.15, active: true  }   # relative chord sequence + stats (Phase 2)
+  melody:         { value: 0.10, active: true  }   # pitch + relative interval sequence (Phase 2)
+  vocal:          { value: 0.10, active: true  }   # vocal presence/intensity/pitch (Phase 2, both-vocal only)
+  instrumentation: { value: 0.05, active: true }   # bass/drum energy distribution (Phase 2)
+  structure:      { value: 0.05, active: true  }   # segments / energy curve (Phase 3)
+  semantic:       { value: 0.05, active: false }   # high-level perception (Phase 4)
+
+# When embedding is the main signal, song->song blends FAISS recall with
+# these metadata group scores during re-ranking (spec section 28).
+normalize: true
