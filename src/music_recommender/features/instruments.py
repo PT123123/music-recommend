@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 
 
-def instrument_features(y: np.ndarray, sr: int) -> dict:
+def instrument_features(y: np.ndarray, sr: int,
+                        separated: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
     import librosa
     S = np.abs(librosa.stft(y, hop_length=512)) ** 2  # power spectrogram (n_freq, n_frames)
     freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
@@ -19,8 +20,10 @@ def instrument_features(y: np.ndarray, sr: int) -> dict:
         m = (freqs >= lo) & (freqs < hi)
         return float(S[m].sum() / total)
 
-    _, perc = librosa.effects.hpss(y, margin=(3.0, 5.0))
-    rms_h = float(np.sqrt(np.mean(_ ** 2)))
+    if separated is None:
+        separated = librosa.effects.hpss(y, margin=(3.0, 5.0))
+    harm, perc = separated
+    rms_h = float(np.sqrt(np.mean(harm ** 2)))
     rms_p = float(np.sqrt(np.mean(perc ** 2)))
     percussive_ratio = rms_p / (rms_h + rms_p + 1e-9)
 

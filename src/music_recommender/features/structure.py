@@ -15,7 +15,8 @@ def _band_energy(S, freqs, lo, hi):
     return S[m].sum(axis=0) if m.any() else np.zeros(S.shape[1])
 
 
-def structure_features(y: np.ndarray, sr: int, n_bins: int = 64, max_segments: int = 8) -> dict:
+def structure_features(y: np.ndarray, sr: int, n_bins: int = 64, max_segments: int = 8,
+                       separated: tuple[np.ndarray, np.ndarray] | None = None) -> dict:
     import librosa
     hop = 512
     rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
@@ -23,7 +24,9 @@ def structure_features(y: np.ndarray, sr: int, n_bins: int = 64, max_segments: i
     freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
     bass = _band_energy(S, freqs, 20, 250)
     high = _band_energy(S, freqs, 2000, 8000)
-    harm, perc = librosa.effects.hpss(y, margin=(3.0, 5.0))
+    if separated is None:
+        separated = librosa.effects.hpss(y, margin=(3.0, 5.0))
+    harm, perc = separated
     perc_rms = librosa.feature.rms(y=perc, frame_length=2048, hop_length=hop)[0]
     harm_rms = librosa.feature.rms(y=harm, frame_length=2048, hop_length=hop)[0]
     contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop)

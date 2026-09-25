@@ -56,6 +56,18 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     y, sr = librosa.load(wav_path, sr=sr, mono=True)
     max_sec = float(get_config().audio.get("max_analysis_seconds", 0) or 0)
     y, win_start, win_end = _analysis_window(y, sr, max_sec)
+    cfgf = get_config().features
+    seq_budget = int(cfgf.get("max_sequence_tokens", 120))
+
+    # hpss and pyin are each computed ONCE here and injected into the modules that
+    # need them. They previously ran per-module (pyin x2, hpss x3), which dominated
+    # extraction cost. Pitch analysis runs on the harmonic stem, which is also the
+    # cleaner melody input.
+    separated = librosa.effects.hpss(y, margin=(3.0, 5.0))
+    harm = separated[0]
+    pitch_sec = float(cfgf.get("max_pitch_seconds", 30))
+    f0, _, _ = librosa.pyin(harm[: int(min(len(harm), pitch_sec * sr))], sr=sr,
+                            fmin=melody.FMIN, fmax=melody.FMAX, frame_length=2048, hop_length=256)
 
     feats = TrackFeatures()
     feats.scalars["duration"] = float(duration)
@@ -73,8 +85,8 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     # --- Phase 2 features (estimated, flagged) ---
     hm = harmony.estimate_chords(y, sr)
     rel = harmony.relative_sequence(hm.get("chord_roots", []), hm.get("chord_qualities", []), key, mode)
-    feats.scalars["chord_sequence"] = ",".join(hm.get("chord_sequence", []))
-    feats.scalars["relative_chord_sequence"] = ",".join(rel)
+    feats.scalars["chord_sequence"] = ",".join(melody.cap_sequence(hm.get("chord_sequence", []), seq_budget))
+    feats.scalars["relative_chord_sequence"] = ",".join(melody.cap_sequence(rel, seq_budget))
     feats.scalars["chord_change_rate"] = hm.get("chord_change_rate")
     feats.scalars["harmonic_rhythm"] = hm.get("harmonic_rhythm")
     feats.scalars["dissonance_mean"] = hm.get("dissonance_mean")
@@ -84,7 +96,7 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     feats.extras["chord_sequence_list"] = hm.get("chord_sequence", [])
     feats.extras["relative_sequence_list"] = rel
 
-    mel = melody.melody_features(y, sr)
+    mel = melody.melody_features(y, sr, f0=f0)
     for k in ("pitch_min", "pitch_max", "pitch_mean", "pitch_range", "pitch_variance",
               "low_pitch_ratio", "mid_pitch_ratio", "high_pitch_ratio", "melody_contour_type"):
         feats.scalars[k] = mel.get(k)
@@ -94,14 +106,14 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     feats.extras["voiced_ratio"] = mel.get("voiced_ratio")
     feats.extras["melody_density"] = mel.get("melody_density")
 
-    ins = instr.instrument_features(y, sr)
+    ins = instr.instrument_features(y, sr, separated=separated)
     feats.scalars["bass_energy_ratio"] = ins.get("bass_energy_ratio")
     feats.scalars["drum_energy_ratio"] = ins.get("drum_energy_ratio")
     feats.extras["low_energy_ratio"] = ins.get("low_energy_ratio")
     feats.extras["mid_energy_ratio"] = ins.get("mid_energy_ratio")
     feats.extras["high_energy_ratio"] = ins.get("high_energy_ratio")
 
-    vc = vocal_mod.vocal_features(y, sr)
+    vc = vocal_mod.vocal_features(y, sr, harm=harm, f0=f0)
     feats.scalars["has_vocal"] = vc.get("has_vocal")
     feats.scalars["vocal_ratio"] = vc.get("vocal_ratio")
     feats.scalars["vocal_gender"] = vc.get("vocal_gender")
@@ -113,7 +125,7 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     feats.extras["vocal_periodicity"] = vc.get("vocal_periodicity")
 
     # --- Phase 3 structure features ---
-    st = structure.structure_features(y, sr)
+    st = structure.structure_features(y, sr, separated=separated)
     feats.scalars["segment_type_sequence"] = st.get("segment_type_sequence")
     feats.scalars["chorus_repeat_count"] = st.get("chorus_repeat_count")
     feats.scalars["chorus_energy"] = st.get("chorus_energy")
@@ -126,8 +138,8 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
         if ce - cs > int(0.5 * sr):
             hm_c = harmony.estimate_chords(y[cs:ce], sr)
             rel_c = harmony.relative_sequence(hm_c.get("chord_roots", []), hm_c.get("chord_qualities", []), key, mode)
-            feats.scalars["chorus_chord_sequence"] = ",".join(hm_c.get("chord_sequence", []))
-            feats.extras["chorus_relative_sequence"] = rel_c
+            feats.scalars["chorus_chord_sequence"] = ",".join(melody.cap_sequence(hm_c.get("chord_sequence", []), seq_budget))
+            feats.extras["chorus_relative_sequence"] = melody.cap_sequence(rel_c, seq_budget)
 
     feats.estimated_fields = ["chord", "melody_pitch", "vocal_presence", "instrument_energy", "structure"]
     feats.stat_vector = _build_stat_vector(feats)

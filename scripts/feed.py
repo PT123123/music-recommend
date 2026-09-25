@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 
-from common import get_logger
+from common import get_logger, track_label
 from music_recommender.database import repository
 from music_recommender.database.schema import connect
 from music_recommender.recommender import Recommender
@@ -18,9 +18,7 @@ from music_recommender.utils.config import get_config
 
 
 def _name(conn, tid):
-    from pathlib import Path
-    row = repository.get_track(conn, tid)
-    return Path(row["file_path"]).name if row else tid
+    return track_label(repository.get_track(conn, tid), tid)
 
 
 def main():

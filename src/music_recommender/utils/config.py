@@ -30,6 +30,7 @@ def _load_yaml(name: str) -> dict[str, Any]:
 class Config:
     audio: dict = field(default_factory=dict)
     paths: dict = field(default_factory=dict)
+    features: dict = field(default_factory=dict)
     embedding: dict = field(default_factory=dict)
     vector_store: dict = field(default_factory=dict)
     retrieval: dict = field(default_factory=dict)
@@ -75,6 +76,7 @@ def get_config() -> Config:
     return Config(
         audio=cfg.get("audio", {}),
         paths=cfg.get("paths", {}),
+        features=cfg.get("features", {}),
         embedding=cfg.get("embedding", {}),
         vector_store=cfg.get("vector_store", {}),
         retrieval=cfg.get("retrieval", {}),

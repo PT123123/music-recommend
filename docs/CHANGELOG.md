@@ -2,6 +2,19 @@
 
 本地音乐 MIR 特征提取与内容驱动推荐系统。按规格 Phase 1–7 逐竖切交付。
 
+## 真实查询延迟修正 + 扫描/身份/元数据四项(本次)
+在真实曲库上把"查询亚秒级"这句未经核实的声明拆开验证,发现并修掉四项,同时补上文件自带元数据的读取。
+
+- **song→song 266 秒 → ~0.55 秒**(ADR-10):旋律序列原本逐帧存,真实曲目 2677–4015 token,Levenshtein 是 O(n·m) 纯 Python,20 候选实测 **266 秒**。新增 `features.max_sequence_tokens`(120)均匀降采样预算 + `melody._note_events()` 先把 pyin 轨迹转成音级事件;`interval_histogram` 仍按全量事件统计,不被预算截断。93 首真实库最终实测 10 次均值 **0.55 秒**(最大 0.65 秒),category 0.026 秒、feed 0.099 秒。
+- **旋律分桶 1 → 2 个半音**(ADR-10):真实音频量得 1 半音分桶时 83–90% 的"音高变化"只是取整边界抖动;配 `melody_pitch_smooth_frames: 5` 中值滤波后该比例归零,`pitch_range` 保持在 ≤1 半音误差内。代价明确记录:小于 2 半音的级进会被合并——不假装拥有 tracker 没有的分辨率。
+- **抽取去重**(ADR-11):`extract.py` 统一算一次 `hpss` 与一次 `pyin` 并注入 `melody` / `vocal` / `instruments` / `structure`(原来是 pyin×2、hpss×3);实测单首 43.1 秒里 pyin 28.7 秒、hpss 5.9 秒。93 首 6 worker 全库重扫 32 分钟 → **22 分钟**。测试 `test_pyin_and_hpss_run_once_per_track` 用 monkeypatch 计数守住这条。
+- **增量扫描**(ADR-13):`tracks.file_size` / `file_mtime` 入库,`MusicLibrary.index(force=False)` 跳过未变更文件,`scan_library.py --force` / `POST /v1/library/scan {force}` 用于特征版本变更;被跳过的文件仍补读一次 tag(`update_tags()` 只写 tag 列,不动 `stat_vector` / `analyzed_at`)。实测第二次扫描 0.0 秒。`schema.py` 加 `_migrate()`(`PRAGMA table_info` + `ALTER TABLE`),旧库不改结构即可升级,已在 93 行旧库副本上验证四个新列补齐、行数不变。
+- **track_id 改内容哈希**(ADR-12):路径哈希 → `size + 首尾 256KB` 的 SHA-1 前 16 位,重命名/挪目录不再把 `interactions` / `evaluations` 变成孤儿;`test_track_id_survives_rename_and_copy` 守住这条。旧真实库(93 行,路径 id)已挪入 `.quarantine-20260925/music-old-pathhash-trackid.db`,重新全量入库。
+- **读取文件自带 tag**(ADR-14):新增 `preprocess/metadata.py`(mutagen,惰性导入,读不到不报错),`tracks` 增 `year` / `meta_source` 列并写入 title/artist/album/year;`repository.display_map()` 一次查询补齐,`/v1/recommend/*` 与 `/v1/feed/next` 结果新增 `display` 块(含 `meta_source`),CLI 标签优先用 tag、退回文件名。诚实边界:tag 是文件自己的声明,永不进入 `estimate_flags`,也不从文件名猜;实测该 93 首 **wav 全部无 tag**(`meta_source='none'`,标题列仍为空),而 `~/Music` 下 40 首 mp3 有 40 首带 tag——同一份代码,两种事实。
+- 依赖:`requirements.txt` / `pyproject.toml` 增加 `mutagen`。
+- 测试:新增 `tests/test_scan_identity.py`(11 项:身份稳定、tag 读/无 tag、tag 落库、`update_tags` 不触发重算、增量跳过四情形、半行不算已分析、pyin/hpss 计数、序列预算、抖动抑制)。两条失败先查自己的断言:±0.4 半音抖动不跨取整边界(改用 60.5±0.35 的真实抖动模型)、`update_tags` 测试传了自相矛盾的 `meta_source`,均为测试写错而非实现错。
+- 文档:`docs/PERFORMANCE.md` 更正"加载后查询亚秒级"这条未经真实曲库核实的旧声明,并补入上表实测数字。
+
 ## 真实曲库首跑 + 可用性修正
 - 首次跑真实曲库(本地一个歌单文件夹,93 首 WAV / 3.7 GB):全部入库,0 失败;非音频文件(`.txt`/`.url`)按扩展名正确跳过。
 - `config.yaml: audio.max_analysis_seconds`(默认 45):`extract._analysis_window()` 取**能量最密集的连续窗口**(滑动块能量 argmax),而非开头,保证覆盖副歌;`duration` 仍为整曲真实时长,窗口起止记入 `features_json`。单首 172 秒 → 并行摊薄到约 20 秒。

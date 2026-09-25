@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     title TEXT,
     artist TEXT,
     album TEXT,
+    year INTEGER,
     duration REAL,
 
     language TEXT,
@@ -61,7 +62,17 @@ CREATE TABLE IF NOT EXISTS tracks (
     embedding_id INTEGER,
     feature_version TEXT,
     embedding_model TEXT,
-    analyzed_at TEXT
+    analyzed_at TEXT,
+
+    -- File-level facts used for incremental re-scan (skip unchanged files).
+    file_size INTEGER,
+    file_mtime REAL,
+
+    -- Where title/artist/album/year came from: 'tag' (read from the file's own
+    -- embedded metadata), 'none', or null for a legacy row. Kept separate from
+    -- estimate_flags because tag data is *not* audio analysis: it is reported
+    -- verbatim from the file and must never be presented as MIR-derived.
+    meta_source TEXT
 );
 
 -- PCA/nn embeddings live here so FAISS can be deleted and rebuilt without
@@ -127,15 +138,35 @@ CREATE TABLE IF NOT EXISTS evaluations (
 """
 
 
+# Columns added after the initial release. CREATE TABLE IF NOT EXISTS will not
+# alter an existing table, so pre-existing databases get patched here.
+_MIGRATIONS: dict[str, str] = {
+    "file_size": "INTEGER",
+    "file_mtime": "REAL",
+    "year": "INTEGER",
+    "meta_source": "TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(tracks)")}
+    for col, decl in _MIGRATIONS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
+    conn.commit()
+
+
 def connect(db_file: Path) -> sqlite3.Connection:
     Path(db_file).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_file))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)  # idempotent: ensures all tables exist for any consumer
+    _migrate(conn)
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()

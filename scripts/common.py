@@ -13,7 +13,17 @@ from music_recommender.utils.config import get_config  # noqa: E402
 from music_recommender.utils.logging import get_logger  # noqa: E402
 
 
-def display_name(db_path: str, track_row) -> str:
-    """Prefer a readable filename for CLI output."""
+def track_label(row, fallback: str) -> str:
+    """Readable CLI label for a track row: the file's own tag when present, else
+    its filename. Tag text is only a label — provenance stays in `meta_source`,
+    so nothing tag-derived is presented as MIR output.
+    """
+    if row is None:
+        return fallback
+    title, artist = row["title"], row["artist"]
+    if title and artist:
+        return f"{artist} - {title}"
+    if title:
+        return str(title)
     from pathlib import Path as _P
-    return _P(track_row["file_path"]).name if track_row and track_row["file_path"] else db_path
+    return _P(row["file_path"]).name if row["file_path"] else fallback

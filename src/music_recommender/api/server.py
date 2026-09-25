@@ -31,6 +31,7 @@ class ScanRequest(BaseModel):
     root: str
     recursive: bool = True
     workers: int = 1
+    force: bool = False
 
 
 class IndexRequest(BaseModel):
@@ -64,6 +65,30 @@ class EvaluateRequest(BaseModel):
     recommended_track_id: str
     label: int
     note: str | None = None
+
+
+def _tid(item) -> str:
+    return item["track_id"] if isinstance(item, dict) else item.track_id
+
+
+def _with_display(items: list) -> list[dict]:
+    """Attach file path + tag names to each result so a player can render a list
+    in one round-trip. `display.meta_source` marks them as the file's own claim,
+    not MIR output; items absent from the DB simply get an empty display."""
+    from dataclasses import asdict
+
+    conn = connect(get_config().db_path)
+    try:
+        names = repository.display_map(conn, [_tid(i) for i in items])
+    finally:
+        conn.close()
+    out = []
+    for item in items:
+        d = dict(item) if isinstance(item, dict) else asdict(item)
+        info = names.get(d["track_id"], {})
+        d["display"] = {k: v for k, v in info.items() if k != "track_id"}
+        out.append(d)
+    return out
 
 
 def create_app() -> FastAPI:
@@ -102,15 +127,14 @@ def create_app() -> FastAPI:
         else:
             raise HTTPException(400, "provide track_id or file_path")
         return {"seed": req.track_id or req.file_path,
-                "recommendations": [{"track_id": r.track_id, "score": r.score, "reasons": r.reasons}
-                                    for r in items]}
+                "recommendations": _with_display(items)}
 
     @app.post("/v1/library/scan")
     def library_scan(req: ScanRequest):
         if not Path(req.root).exists():
             raise HTTPException(400, "root does not exist")
         lib = MusicLibrary()
-        summary = lib.index(req.root, recursive=req.recursive, workers=req.workers)
+        summary = lib.index(req.root, recursive=req.recursive, workers=req.workers, force=req.force)
         lib.rebuild_embeddings()
         lib.build_faiss()
         return summary
@@ -141,7 +165,7 @@ def create_app() -> FastAPI:
             raise HTTPException(404, str(exc))
         return {"category": seed, "ignored_dims": meta.get("ignored", []),
                 "usable_dims": meta.get("usable", 0),
-                "recommendations": items}
+                "recommendations": _with_display(items)}
 
     @app.post("/v1/feed/next")
     def feed_next(req: FeedNextRequest):
@@ -150,7 +174,7 @@ def create_app() -> FastAPI:
             items = rec.feed_next(req.user_id, limit=req.limit, exclude_track_ids=req.exclude_track_ids)
         except Exception as exc:
             raise HTTPException(500, str(exc))
-        return {"items": items}
+        return {"items": _with_display(items)}
 
     @app.post("/v1/feed/feedback")
     def feed_feedback(req: FeedbackRequest):

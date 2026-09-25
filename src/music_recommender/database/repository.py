@@ -4,11 +4,21 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import sqlite3
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from ..features.extract import TrackFeatures
+
+
+def _file_stat(file_path: str) -> tuple[Optional[int], Optional[float]]:
+    """(size, mtime) for incremental-scan bookkeeping; None if the file is gone."""
+    try:
+        st = Path(file_path).stat()
+        return int(st.st_size), float(st.st_mtime)
+    except OSError:
+        return None, None
 
 
 def _blob(a: Optional[np.ndarray]) -> Optional[bytes]:
@@ -22,12 +32,24 @@ def _json(obj) -> Optional[str]:
 
 
 def upsert_track(conn: sqlite3.Connection, track_id: str, file_path: str,
-                 normalized_path: str, feats: TrackFeatures, embedding_model: str) -> None:
+                 normalized_path: str, feats: TrackFeatures, embedding_model: str,
+                 tags: Optional[dict] = None) -> None:
     s = feats.scalars
+    tags = tags or {}
+    size, mtime = _file_stat(file_path)
     row = {
         "track_id": track_id,
         "file_path": str(file_path),
         "normalized_path": str(normalized_path),
+        "title": tags.get("title"),
+        "artist": tags.get("artist"),
+        "album": tags.get("album"),
+        "year": tags.get("year"),
+        "language": tags.get("language"),
+        # provenance of the four fields above: 'tag' = the file's own claim, never MIR output
+        "meta_source": tags.get("meta_source", "none"),
+        "file_size": size,
+        "file_mtime": mtime,
         "duration": s.get("duration"),
         "rms_mean": s.get("rms_mean"), "rms_std": s.get("rms_std"),
         "rms_p10": s.get("rms_p10"), "rms_p25": s.get("rms_p25"),
@@ -113,6 +135,58 @@ def insert_segments(conn: sqlite3.Connection, track_id: str, segments: list[dict
 
 def get_track_by_path(conn: sqlite3.Connection, file_path: str) -> Optional[sqlite3.Row]:
     return conn.execute("SELECT * FROM tracks WHERE file_path=?", (str(file_path),)).fetchone()
+
+
+def scan_state(conn: sqlite3.Connection) -> dict[str, tuple[int, float]]:
+    """{file_path: (size, mtime)} for rows that hold a complete analysis.
+
+    Only rows with a stored stat_vector count as analysed: a track written by an
+    earlier crash mid-pipeline must be re-done, not skipped forever.
+    """
+    rows = conn.execute(
+        "SELECT file_path, file_size, file_mtime FROM tracks "
+        "WHERE stat_vector IS NOT NULL AND file_size IS NOT NULL AND file_mtime IS NOT NULL"
+    ).fetchall()
+    return {r["file_path"]: (int(r["file_size"]), float(r["file_mtime"])) for r in rows}
+
+
+def paths_without_tags(conn: sqlite3.Connection) -> set[str]:
+    """Files whose tag columns were never filled from the file itself."""
+    rows = conn.execute(
+        "SELECT file_path FROM tracks WHERE stat_vector IS NOT NULL "
+        "AND (meta_source IS NULL OR meta_source='none')"
+    ).fetchall()
+    return {r["file_path"] for r in rows}
+
+
+def update_tags(conn: sqlite3.Connection, file_path: str, tags: dict) -> None:
+    """Write only the tag columns for an already-analysed file (no re-analysis)."""
+    conn.execute(
+        "UPDATE tracks SET title=:title, artist=:artist, album=:album, year=:year, "
+        "language=:language, meta_source=:meta_source WHERE file_path=:file_path",
+        {"file_path": str(file_path),
+         "title": tags.get("title"), "artist": tags.get("artist"),
+         "album": tags.get("album"), "year": tags.get("year"),
+         "language": tags.get("language"), "meta_source": tags.get("meta_source", "none")},
+    )
+    conn.commit()
+
+
+def display_map(conn: sqlite3.Connection, track_ids) -> dict[str, dict]:
+    """{track_id: {title, artist, album, file_path, meta_source}} in one query.
+
+    A player renders a recommendation list without N+1 requests, and `meta_source`
+    travels with every row so the UI can never present a tag as analysed audio.
+    """
+    ids = [t for t in dict.fromkeys(track_ids) if t]
+    if not ids:
+        return {}
+    q = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT track_id, title, artist, album, file_path, meta_source FROM tracks WHERE track_id IN ({q})",
+        ids,
+    ).fetchall()
+    return {r["track_id"]: dict(r) for r in rows}
 
 
 def all_tracks(conn: sqlite3.Connection) -> list[sqlite3.Row]:

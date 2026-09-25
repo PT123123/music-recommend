@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from common import get_logger
+from common import get_logger, track_label
 from music_recommender.database import repository
 from music_recommender.database.schema import connect
 from music_recommender.recommender import Recommender
@@ -24,9 +24,7 @@ def _resolve_track_id(rec: Recommender, path: str) -> str | None:
 
 
 def _name(rec: Recommender, track_id: str) -> str:
-    row = repository.get_track(rec.conn, track_id)
-    from pathlib import Path
-    return Path(row["file_path"]).name if row and row["file_path"] else track_id
+    return track_label(repository.get_track(rec.conn, track_id), track_id)
 
 
 def main():

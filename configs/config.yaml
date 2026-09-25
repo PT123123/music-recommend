@@ -19,6 +19,25 @@ paths:
   faiss_dir: data/faiss
   logs_dir: logs
 
+# Sequence similarity budget. Levenshtein is O(n*m), so an unbounded per-frame
+# melody sequence (real tracks hit ~2700 tokens) made song->song take 266s on a
+# 93-track library. Sequences are quantised to note/chord events and then capped
+# by even subsampling; contour shape survives, per-frame fidelity is not kept.
+features:
+  max_sequence_tokens: 120
+  # Seconds of the harmonic stem fed to pyin. This is the single biggest cost in
+  # extraction (~29s of a ~43s track), so it is the knob to turn for throughput.
+  max_pitch_seconds: 30
+  # pyin's frame-to-frame error on real recordings is ~0.3-0.5 semitone, i.e. the
+  # same size as one semitone. Measured on the real library, 1-semitone buckets made
+  # 83-90% of "note changes" pure rounding flip-flop; a 2-semitone bucket plus a
+  # 5-frame median drops that to 0 while keeping pitch range within 1 semitone.
+  # Consequence: genuine stepwise motion under 2 semitones is merged into one event -
+  # we do not claim resolution the tracker does not have.
+  melody_note_quantise_semitones: 2
+  # Median-filter width in pyin frames before note detection; 0/1 disables.
+  melody_pitch_smooth_frames: 5
+
 embedding:
   # Phase 1 placeholder embedder: librosa statistical features -> PCA.
   # Swap by implementing the AudioEmbedder interface (see embedding/base.py).

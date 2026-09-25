@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from common import get_logger
+from common import get_logger, track_label
 from music_recommender.database import behavior, repository
 from music_recommender.database.schema import connect
 from music_recommender.recommender import Recommender
@@ -63,16 +63,15 @@ def main():
         print("non-interactive stdin; use --record / --export instead")
         return
 
-    print("For each seed, label candidates: y=good, n=bad, s=skip, q=quit\n")
+    print("For each seed, label pairs: y=good, n=bad, s=skip, q=quit\n")
     for r in rows:
         seed = r["track_id"]
-        seed_name = repository.get_track(conn, seed)["file_path"]
+        seed_name = track_label(r, seed)
         recs = rec.similar(seed, limit=args.limit)
         for c in recs:
-            from pathlib import Path
-            cname = Path(repository.get_track(conn, c.track_id)["file_path"]).name
+            cname = track_label(repository.get_track(conn, c.track_id), c.track_id)
             try:
-                ans = input(f"seed={Path(seed_name).name}  ->  {cname} ({c.score:.3f})  [y/n/s]? ").strip().lower()
+                ans = input(f"seed={seed_name}  ->  {cname} ({c.score:.3f})  [y/n/s]? ").strip().lower()
             except EOFError:
                 ans = "q"
             if ans == "q":

@@ -19,6 +19,7 @@ dependencies = [
     "pydantic",
     "pyyaml",
     "ffmpeg-python",
+    "mutagen",
 ]
 
 [tool.setuptools.packages.find]

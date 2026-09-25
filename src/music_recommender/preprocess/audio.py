@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,9 +20,37 @@ def _ffmpeg_bin() -> str | None:
     return shutil.which("ffmpeg")
 
 
+_CHUNK = 256 * 1024
+
+
 def track_id_for(file_path: Path) -> str:
-    """Stable id derived from absolute path so re-scans are idempotent."""
-    return hashlib.sha1(str(file_path.resolve()).encode("utf-8")).hexdigest()[:16]
+    """Stable id derived from file *content*, not path.
+
+    A path hash made renaming or reorganising a folder silently orphan every
+    interaction/evaluation row for that track (spec 49/56 history becomes
+    unreachable). Size + first/last byte blocks is stable across moves and cheap
+    to compute; re-encoded files correctly get a new identity.
+    Falls back to the path if the file cannot be read.
+    """
+    p = Path(file_path)
+    h = hashlib.sha1()
+    try:
+        size = p.stat().st_size
+        h.update(b"v2:" + str(size).encode())
+        with open(p, "rb") as fh:
+            h.update(fh.read(_CHUNK))
+            if size > 2 * _CHUNK:
+                fh.seek(-_CHUNK, os.SEEK_END)
+                h.update(fh.read(_CHUNK))
+    except OSError:
+        h.update(b"path:" + str(p.resolve()).encode())
+    return h.hexdigest()[:16]
+
+
+def file_signature(file_path: Path) -> tuple[int, float]:
+    """(size, mtime) used to skip unchanged files on re-scan."""
+    st = Path(file_path).stat()
+    return int(st.st_size), float(st.st_mtime)
 
 
 def normalize(file_path: Path, out_dir: Path | None = None) -> tuple[Path, float, int]:

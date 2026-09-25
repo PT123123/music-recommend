@@ -66,7 +66,7 @@ configs/     config.yaml(路径/音频/embedding/检索/feed 衰减权重) weigh
 docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈)
 scripts/     CLI 入口(见下)
 src/music_recommender/
-  preprocess/  音频标准化 (ffmpeg / librosa)
+  preprocess/  音频标准化 (ffmpeg / librosa) + 内嵌 tag 读取 (mutagen)
   features/    MIR 特征提取 (acoustic / rhythm / harmony / melody / vocal / instruments / structure)
   embedding/   AudioEmbedder 抽象 + PCA 占位实现
   database/    SQLite schema + repository(事实来源)+ behavior(互动/兴趣快照/评测)
@@ -107,6 +107,14 @@ python scripts/recommend.py --category high_female_vocal            # 固定类�
 > **能量最密的连续片段**来抽特征(而不是前奏),把 4 分钟单曲从 ≈172 秒压到 ≈20 秒级;
 > `duration` 仍记录整曲真实时长。设 `0` 表示整曲分析。`workers` 只影响抽取阶段。
 
+> **重扫是增量的**:文件大小 + mtime 未变且已抽过特征就直接跳过(实测第二次扫描 0.0 秒)。
+> 改了特征算法需要全量重算时加 `--force`。`track_id` 由文件内容哈希得到,所以重命名或
+> 挪目录不会丢失该曲的历史行为数据。
+>
+> **标题/歌手/专辑/年份**来自音频文件**自带的 tag**(mutagen),存库时带 `meta_source='tag'`
+> 标记来源;没有 tag 就留空,**不从文件名猜**。这些字段只是给播放器显示用的事实,不参与
+> 内容推荐,也不会被当成音频分析结果。
+
 输出示例:
 ```
 Seed: e5019fc217166ab2
@@ -138,8 +146,12 @@ python scripts/run_server.py --port 8000
 | GET  | `/v1/feed/state` | 当前 short/medium/long 兴趣摘要(可解释) |
 | POST | `/v1/feed/reset` | 清空兴趣:`?scope=short\|medium\|long\|all`(默认 short,不动长期) |
 | POST | `/v1/evaluate` | 记录人工评测标签:`{"seed_track_id":..,"recommended_track_id":..,"label":1}` |
-| POST | `/v1/library/scan` | 扫描目录并端到端入库+建索引 `{"root":"D:/Music","recursive":true}` |
+| POST | `/v1/library/scan` | 扫描目录并端到端入库+建索引 `{"root":"D:/Music","recursive":true,"workers":6,"force":false}` |
 | POST | `/v1/tracks/index` | 单文件入库 `{"file_path":"D:/Music/a.mp3"}` |
+
+三个推荐端点(`/v1/recommend/similar`、`/v1/recommend/category`、`/v1/feed/next`)的每条结果都带
+一个 `display` 块 `{title, artist, album, file_path, meta_source}`,播放器一次请求即可渲染列表;
+`meta_source` 用来区分「文件自带」与「音频分析」,前者的值可能为 `null`(该文件没有 tag)。
 
 示例:
 ```bash
@@ -161,7 +173,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/feed/next \
 from music_recommender import MusicLibrary, Recommender
 
 lib = MusicLibrary()
-lib.index("data/test_music")     # 扫描 + 抽特征(Phase 1-3)
+lib.index("data/test_music")      # 扫描 + 抽特征(Phase 1-3);真实曲库用 workers=6, force=...
 lib.rebuild_embeddings()          # 拟合 PCA + 存 embedding
 lib.build_faiss()                 # 建 FAISS
 
@@ -200,10 +212,15 @@ energy / timbre / rhythm / harmony / melody / vocal / instrumentation / structur
 
 ```bash
 # 端到端控制校验:每个种子最近邻应落在同一家族(合成数据按族构造)
-python tests/verify_mvp.py            # 期望输出 VERDICT: PASS(12/12)
+python scripts/scan_library.py data/test_music   # 注意:写入的是 config 指向的那个库
+python tests/verify_mvp.py                       # 期望 VERDICT: PASS(12/12)
+#   它靠合成文件名判定家族;对着真实曲库的库跑会打印 SKIP,而不是给出错的结论。
+#   跑完想回真实曲库:python scripts/scan_library.py "D:/Music/我的歌单" --workers 6
 
 # 单元 + 集成测试(独立临时 DB / FAISS,不污染 data/)
-python -m pytest tests/test_pipeline.py -q
+python -m pytest tests/test_pipeline.py -q        # 管线 / embedding / FAISS / 推荐 / 评测
+python -m pytest tests/test_scan_identity.py -q   # 扫描身份 / tag 读取 / 增量跳过 / 序列预算 / DSP 去重
+python -m pytest tests/test_feed.py -q            # Feed 时间衰减 + 差分喜欢偏好
 ```
 
 ## 故障处理
