@@ -65,7 +65,7 @@ MVP 使用 **轻量占位方案**:`librosa 统计特征 → StandardScaler → P
 
 ```
 configs/     config.yaml(路径/音频/embedding/检索/feed 衰减权重) weights.yaml(推荐分组权重) categories.yaml(类别定义)
-docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈) PORTING.md(移动端可行性)
+docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈) PORTING.md(移动端可行性) DEPYTHON.md(去 Python 现状与三条路线)
 scripts/     CLI 入口(见下)
 src/music_recommender/
   preprocess/  音频标准化 (ffmpeg / librosa) + 内嵌 tag 读取 (mutagen)
@@ -267,3 +267,4 @@ cd rust/musicspace && cargo run --release -- data/portability --verify          
 - `docs/CHANGELOG.md` — Phase 1–7 逐竖切交付清单 + 之后每一轮的实测修正。
 - `docs/PERFORMANCE.md` — 实测耗时、复杂度、后续优化方向(含两次勘误的来龙去脉)。
 - `docs/PORTING.md` — 移动端可行性:载荷/算术实测、std-only Rust 端口的逐位次等价验证、已知边界与移植清单。
+- `docs/DEPYTHON.md` — 完全去 Python 分析:Python 残留在哪、runtime 边界、桌面抽取端三条路线(冻结 exe / Rust 化 / 瘦身)与换算法纪律。
