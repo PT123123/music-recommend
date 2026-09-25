@@ -98,7 +98,7 @@ def test_read_tags_absent_is_none_not_guessed(tmp_path):
     # No tags -> every field stays None with meta_source='none'. A filename is never
     # parsed into a title: tag data must be the file's own claim, not our inference.
     assert t == {"title": None, "artist": None, "album": None, "year": None,
-                 "language": None, "meta_source": "none"}
+                 "language": None, "genre": None, "meta_source": "none"}
 
 
 def test_tag_fields_are_stored_and_marked(tmp_path, isolated_norm_dir):

@@ -78,6 +78,44 @@ feed:
     strategy: diverse           # no behaviour yet -> diverse sample, NOT external popularity
     exploration: 0.3
 
+# Category system (spec 30-32, 63-64): presets live in configs/categories.yaml.
+# This is the one remaining knob panel for it: ranking engine, unsupervised
+# discovery, free-text parsing, plus `extra` for user-added categories.
+category_system:
+  engine:
+    # A category "has real backing" when at least this many library tracks land within
+    # support_max_distance of its target percentiles. Small libraries must not look
+    # confident: below `min_support` the result carries low_support=true.
+    support_max_distance: 0.25
+    support_min_share: 0.05
+    support_min_count: 5
+    # Near-duplicate suppression so a 30-item category list is not the same song family.
+    dedupe: true
+    dedupe_lambda: 0.80          # relevance vs. redundancy
+    dedupe_max_similarity: 0.97  # above this cosine to an already-picked track: dropped
+  discovery:
+    enabled: true
+    include_in_listing: true
+    k_min: 4
+    k_max: 12
+    min_cluster_size: 4          # absolute floor...
+    min_cluster_share: 0.04      # ...and as a share of the library, whichever is larger
+    name_min_deviation: 0.15     # a dimension must sit this far from the library middle
+    name_max_terms: 3            # max dimensions woven into one auto name
+    # Missing percentiles (e.g. every vocal dimension on an instrumental) are imputed to
+    # the library middle, never to an extreme: "we did not measure it" must not read as
+    # "it is low".
+    neutral_impute: 0.5
+    presence_split: 0.25
+    tag_min_coverage: 0.60       # only name a cluster after a tag if 60% of members carry it
+    tag_min_purity: 0.70         # ...and 70% of those agree on the same value
+    random_state: 0
+  text:
+    target_high: 0.85
+    target_low: 0.15
+    keep_first: true
+  extra: []
+
 logging:
   level: INFO
   pipeline_log: logs/pipeline.log

@@ -38,6 +38,10 @@ class Config:
     feature_version: str = "v1"
     weights: dict = field(default_factory=dict)
     categories: list = field(default_factory=list)
+    # The one place to tune the whole category path: {engine, discovery, text, extra}.
+    # `extra` holds hand-written categories merged into `categories` by id, so a user
+    # can add or override preset categories without editing the shipped preset file.
+    category_system: dict = field(default_factory=dict)
 
     # ---- path helpers (absolute) ----
     def abs(self, rel: str | os.PathLike) -> Path:
@@ -68,11 +72,22 @@ class Config:
         return out
 
 
+def load_categories(extra: list | None = None) -> list:
+    """Shipped presets, then `category_system.extra` merged by id (a duplicate id wins,
+    so local tuning always beats the preset)."""
+    preset = {c["id"]: c for c in _load_yaml("categories.yaml").get("categories", [])
+              if isinstance(c, dict) and "id" in c}
+    for c in extra or []:
+        if isinstance(c, dict) and "id" in c:
+            preset[c["id"]] = c
+    return list(preset.values())
+
+
 @lru_cache(maxsize=1)
 def get_config() -> Config:
     cfg = _load_yaml("config.yaml")
     weights = _load_yaml("weights.yaml")
-    cats = _load_yaml("categories.yaml")
+    settings = cfg.get("category_system", {}) or {}
     return Config(
         audio=cfg.get("audio", {}),
         paths=cfg.get("paths", {}),
@@ -83,5 +98,6 @@ def get_config() -> Config:
         logging=cfg.get("logging", {}),
         feature_version=cfg.get("feature_version", "v1"),
         weights=weights,
-        categories=cats.get("categories", []),
+        categories=load_categories(settings.get("extra")),
+        category_system=settings,
     )

@@ -4,6 +4,7 @@ Usage:
     python scripts/recommend.py D:/Music/a.mp3 --limit 20
     python scripts/recommend.py --track-id <id> --json
     python scripts/recommend.py D:/Music/a.mp3 --category high_energy
+    python scripts/recommend.py --text "来点安静又明亮的纯音乐" --limit 10
 """
 from __future__ import annotations
 
@@ -33,28 +34,47 @@ def main():
     ap.add_argument("--track-id", help="seed track id (if already indexed)")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--category", help="fixed-category id (Phase 4; MVP lists available)")
+    ap.add_argument("--category", help="fixed-category id (preset or auto-discovered)")
+    ap.add_argument("--text", help='free Chinese request, e.g. "来点安静又明亮的纯音乐"')
     args = ap.parse_args()
 
     log = get_logger()
     cfg = get_config()
     rec = Recommender(cfg)
 
-    if args.category:
+    if args.text or args.category:
+        seed_label = args.text if args.text else args.category
         try:
-            items, meta = rec.category(args.category, limit=args.limit)
+            if args.text:
+                items, meta = rec.category_text(args.text, limit=args.limit)
+            else:
+                items, meta = rec.category(args.category, limit=args.limit)
         except KeyError as exc:
             print(str(exc)); return
         if args.json:
-            print(json.dumps({"category": args.category, "meta": meta, "recommendations": items},
+            print(json.dumps({"category": seed_label, "meta": meta, "recommendations": items},
                              ensure_ascii=False, indent=2))
         else:
             if meta.get("ignored"):
-                print(f"(ignored non-local dims: {meta['ignored']})")
+                print(f"(ignored dims with no local feature: {meta['ignored']})")
+            for t in meta.get("unmatched", []):
+                print(f"（「{t['term']}」你的文件答不了：{t['reason']}）")
+            for p in (meta.get("genre_proxies", []) or []) + (meta.get("vocal_proxies", []) or []):
+                print(f"（「{p['term']}」按 {p.get('genre') or p.get('guess')} 近似："
+                      f"{', '.join(p['dims'])}）")
+            print(f"类别={seed_label}  命中维度={meta.get('used_dims')}  "
+                  f"support={meta.get('support')}/{meta.get('candidate_pool')}"
+                  f"{'  [支持度偏低]' if meta.get('low_support') else ''}")
+            if meta.get("filters_applied"):
+                est = set(meta.get("filter_estimated") or [])
+                shown = [f"{k}{'(估计值)' if k in est else ''}" for k in meta["filters_applied"]]
+                print(f"硬过滤={', '.join(shown)}")
+            if meta.get("unscored_dims"):
+                print(f"（{', '.join(meta['unscored_dims'])} 在过滤后的池子里没有数据，"
+                      f"所以这些维度没有参与排序）")
             if not items:
                 print("No category results — features for this category are not derivable locally.")
                 return
-            print(f"Category: {args.category}")
             for i, it in enumerate(items, 1):
                 print(f"{i}. {it['file_name']}   {it['score']:.3f}")
         return

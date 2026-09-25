@@ -35,12 +35,25 @@ SEQUENCE_COLS: dict[str, str] = {
     "structure": "segment_type_sequence",
 }
 
-# Everything the scoring path reads for one track. Derived from the group definitions so
-# it cannot drift, and used by scripts/bench_portability.py as the on-device payload.
+# Columns the category / discovery path needs but pair scoring does not: lexicon
+# dimensions the pair groups never mention, plus the tag-derived text columns hard
+# filters may match on. Derived from the lexicon so adding a dimension there cannot
+# leave the space silently unable to read it.
+from .lexicon import BY_COL as _LEXICON_COLS  # noqa: E402
+
+_PAIR_COLUMNS = {c for cols in FEATURE_GROUPS.values() for c in cols}
+EXTRA_SPACE_COLUMNS: frozenset[str] = frozenset(
+    (set(_LEXICON_COLS) - _PAIR_COLUMNS) | {"language", "genre"}
+)
+
+# Everything one library read of the tracks table covers: the pair-scoring columns plus
+# the wider set the category path reads. `scripts/bench_portability.py` exports only the
+# group/sequence columns, so this list is a superset of the on-device payload.
 SPACE_COLUMNS: tuple[str, ...] = tuple(sorted(
     {"track_id", "has_vocal", "energy_curve"}
     | {c for cols in FEATURE_GROUPS.values() for c in cols}
     | set(SEQUENCE_COLS.values())
+    | EXTRA_SPACE_COLUMNS
 ))
 
 # Human-readable reason labels per group (spec section 59: reasons must be real).
@@ -57,20 +70,32 @@ GROUP_REASON = {
 
 class MusicSpace:
     def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
         # Only the scoring columns: SELECT * drags embeddings, segment dumps and every
         # other scalar along, and this object is rebuilt whenever the library changes.
         self.rows = {r["track_id"]: dict(r) for r in repository.rows_with_columns(conn, SPACE_COLUMNS)}
         self._build_percentiles()
         self._seqs: dict[str, dict[str, list]] = {}
         self._curves: dict[str, list[float]] = {}
+        self._vectors: dict[str, np.ndarray] | None = None
+        # discovered categories are derived from this object's percentiles, so they
+        # expire together with it (one instance per library version)
+        self.discovery_cache: tuple[list[dict], dict] | None = None
+
+    def _percentile_columns(self) -> list[str]:
+        """Every column we can rank on: pair-similarity groups plus the lexicon."""
+        cols = {c for group in FEATURE_GROUPS.values() for c in group} | set(_LEXICON_COLS)
+        return sorted(c for c in cols if any(
+            r.get(c) is not None and isinstance(r.get(c), (int, float)) for r in self.rows.values()
+        ))
 
     def _build_percentiles(self) -> None:
-        cols = sorted({c for group in FEATURE_GROUPS.values() for c in group})
+        cols = self._percentile_columns()
         series = defaultdict(list)
         for row in self.rows.values():
             for c in cols:
                 v = row.get(c)
-                if v is not None:
+                if isinstance(v, (int, float)):
                     series[c].append(float(v))
         self.sorted_vals = {c: np.sort(np.asarray(vals, float)) for c, vals in series.items() if len(vals)}
         # One track's percentile on one column is asked for by every pair it appears in,
@@ -80,8 +105,14 @@ class MusicSpace:
             d = self.pct[tid] = {}
             for c, arr in self.sorted_vals.items():
                 v = row.get(c)
-                if v is not None:
+                if isinstance(v, (int, float)):
                     d[c] = float(np.searchsorted(arr, float(v), side="right") / len(arr))
+
+    def vectors(self) -> dict[str, np.ndarray]:
+        """Stored PCA embeddings, loaded once per space (category de-duplication only)."""
+        if self._vectors is None:
+            self._vectors = {tid: vec for _, tid, vec in repository.ordered_embeddings(self.conn)}
+        return self._vectors
 
     def percentile(self, track_id: str, col: str) -> float | None:
         return self.pct.get(track_id, {}).get(col)

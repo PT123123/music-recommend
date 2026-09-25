@@ -68,13 +68,29 @@
 
 ## ADR-15 在线打分路径先做等价优化,再以 std-only Rust 参考实现验证可移植性
 **决定**:
-1. 查询侧(offline 抽取之外)的热点用**字节级等价**的方式优化,而不是换算法:编辑距离交给 `rapidfuzz`(C++,任意元素类型),`MusicSpace` 按库版本 `(COUNT, MAX(rowid), MAX(analyzed_at), MIN/MAX(track_id))` 做进程内缓存(见 ADR-16),`_score_pair` 每个分组只算一次,Feed 的 MMR 用一次矩阵乘代替逐对 numpy 标量调用。
+1. 查询侧(offline 抽取之外)的热点用**字节级等价**的方式优化,而不是换算法:编辑距离交给 `rapidfuzz`(C++,任意元素类型),`MusicSpace` 按库版本 `(COUNT, MAX(rowid), MAX(analyzed_at), MAX(meta_updated_at), MIN/MAX(track_id))` 做进程内缓存(见 ADR-16),`_score_pair` 每个分组只算一次,Feed 的 MMR 用一次矩阵乘代替逐对 numpy 标量调用。
 2. 整条在线路径(分位归一化 → 序列相似度 → 加权合并 → song→song 重排)另写一份 **只依赖 std 的 Rust 实现** `rust/musicspace`,输入是 `scripts/bench_portability.py --export` 导出的打分载荷,输出与 Python 的 top-20 逐位次比对。
 3. **离线抽取不做移植**(暂不搬 Rust/C++):`pyin` + `hpss` 占单首 43.1 秒里的 80%,那部分要换的是算法/模型(见 `docs/PORTING.md`),不是语言。
 **理由**:手机上不了 Python,而"能不能塞进手机"必须用数字回答——载荷 1560 B/首 + 96 B 向量,单查询 92 对 × 9 分组 ≈ 1.28 M 编辑距离格,Rust x86 release 实测 6.1 ms/查询。等价比对是这一结论的前提:如果两份实现排名不同,"能移植"就没有意义。
 **验证与代价**:`--verify` 里同时跑一个**反向对照**(把某个非 embedding 权重翻倍),对照必须报出差异,否则判为不可信并退出 1——纯 0 差异可能是比较根本没执行。实测:12 seed × 20 位次 = 240 slot,**顺序 0 处不一致、分数差 0.0e0**;对照抓到 183 处不一致。代价:Rust 端是打分载荷的**第二份实现**,分组定义/权重/混合系数必须从 `manifest.kv` 读而不是写死,`configs/weights.yaml` 改动后需重新 `--export`;导出物 `data/portability/` 是从私有曲库派生的特征指纹,不入库版本控制。
 
 ## ADR-16 Music Space 是库版本相关的派生数据,按版本指纹缓存
-**决定**:`space.get_music_space(conn)` 用 `(sqlite 文件名, library_version)` 做 key 缓存全库分位;曲库变化(`library_version()` 的五元组任一不同)即重建,且一次只驻留一个库(`_CACHE.clear()`)。每次查询只读打分真正用到的列(`SPACE_COLUMNS`,由 `FEATURE_GROUPS` + `SEQUENCE_COLS` 推导,经 `PRAGMA table_info` 过滤)。
+**决定**:`space.get_music_space(conn)` 用 `(sqlite 文件名, library_version)` 做 key 缓存全库分位;曲库变化(`library_version()` 的六元组 `(COUNT, MAX(rowid), MAX(analyzed_at), MAX(meta_updated_at), MIN/MAX(track_id))` 任一不同)即重建,且一次只驻留一个库(`_CACHE.clear()`)。每次查询只读打分真正用到的列(`SPACE_COLUMNS`,由 `FEATURE_GROUPS` + `SEQUENCE_COLS` + **词表额外列** `EXTRA_SPACE_COLUMNS` 推导,经 `PRAGMA table_info` 过滤)。
 **理由**:分位与曲库强绑定(ADR-2),但重建全库分位实测只要 **6.5 ms**(占第一轮 0.55 秒的 1.3%),而原先**每次查询都重建一次**并全表 `SELECT *`(含 `stat_vector`、`features_json` 等大列)。真正的瓶颈是纯 Python Levenshtein:它占 0.504 秒采样里的 **0.452 秒**,且当时 `_score_pair` 把每个分组算了两次(一次进分数、一次进 detail),所以先去掉重复计算(→0.206 秒量级)再换 rapidfuzz,当前查询 21.4 ms。少读列几乎不为查询省时间,它的价值是让载荷估计(1560 B/首)与实际查询行为一致。
 **代价**:长驻进程里同库并发写入时,缓存最多滞后一次 `library_version` 变化;`analyze` 写库后由版本号推进触发重建,不需要显式失效。
+
+## ADR-17 类别来自共享词表 + 库内聚类自动发现,而不是只有人工预设
+**决定**:类别路径改为三个来源共用一份事实。
+1. `recommendation/lexicon.py` 是**唯一**的"维度 ↔ 查询字段名 ↔ 中文词"表(33 维、142 个词)。`category.DIM_MAP`、`discovery` 的命名、`text_query` 的解析全部从它派生,新增一个维度不需要在第二处登记;`EXTRA_SPACE_COLUMNS` 也由它推导,所以"词表里有、Music Space 读不到"这种静默失配会被 `test_every_preset_category_field_is_known` 当场抓住(本次就是这样抓到 `vocal_pitch_variance`、`mid_pitch_ratio`、`spectral_flux_mean`、`crest_factor`、`chorus_energy`、`chorus_repeat_count` 六维从未被读进空间,即任何以它们为目标的类别都在给一个不存在的维度排序)。
+2. `recommendation/discovery.py`:在**分位空间**(不是原始单位)上做 KMeans,k 在 `[4,12]` 里按轮廓系数选,硬条件是每簇 ≥ `max(min_cluster_size, 4% × 库)`;簇名取质心偏离中位最多的 3 个维度的词表词。发现的类别查询目标**直接来自簇质心分位**,不再手调阈值,因此随曲库自动重标定。
+3. `recommendation/text_query.py`:自由中文 → 词表查询。匹配不上的词(治愈、高级感)进 `unmatched` 并附原因,不映射到"差不多"的维度;否定词翻转目标分位。
+`configs/categories.yaml` 6 → 22 条预设,`config.yaml: category_system` 一处调 `{engine, discovery, text, extra}`,`extra` 按 id 覆盖预设(用户本地新增不必改出厂文件)。
+**理由**:用户反馈两点——"给出的维度其实都是我自己选的…估计后续会听腻",以及 93 首的小曲库下人工定的分位目标本就是猜的。库相对分位 + 聚类把"什么算一类"交回给曲库本身;词表则把"大家平时怎么描述歌"接进来(路线一),聚类命名是路线二。
+**诚实边界**:真实 93 首库实测 k=4、轮廓系数 **0.106**,即簇之间边界本就模糊,4 个自动类别是"能过最小簇规模的全部",不是"曲库确实分成 4 类";`language`/`genre` 不参与聚类(它们不是音频特征),只作为簇名的 tag 后缀且要求覆盖率 ≥60%、纯度 ≥70%。名字只表示"这一簇在这几个可测维度上偏离中位",不是情绪或场景标签。
+**代价**:聚类依赖 sklearn(可选导入,缺失时 `status: no-sklearn` 并退回纯预设);发现结果与分位同寿命,缓存在 Music Space 实例上,库版本一变就重算(93 首 34 维 k=4..12 全扫实测 551 / 696 毫秒,**每个库版本一次**,之后查询为 0 成本;见 `docs/PERFORMANCE.md` 第三轮)。
+
+## ADR-18 语种 / 曲风只来自文件 tag,并参与缓存失效;无 tag 时退为"听感近似"且显式标注
+**决定**:`tracks` 增 `genre` 与 `meta_updated_at` 两列。硬过滤 `language_is` / `genre_is` 只比对文件自带 tag(ADR-14 的延伸),库里无人有该 tag 时结果集为空并回报 `tag_missing` 计数——**不假装能听出语种**。没有 tag 可引时,曲风词退到 `GENRE_TERMS` 的**听感近似**(说唱 = 音域窄 + 节奏密 + 人声在),在 `matched` 里标 `side="proxy"`、词面自带"（按听感近似,非曲风标签）",绝不写进 `estimate_flags`。因为这两列现在被硬过滤和簇命名读取,`update_tags()` 只在值真的改变时 stamp `meta_updated_at`,`library_version()` 把它纳入指纹(ADR-16 六元组),tag 回填不可能留下一个陈旧 Music Space。
+**理由**:第一版实现里 tag 写入不动 `analyzed_at`,回填语种后旧缓存仍会继续服务旧分位与旧簇名;而用户明确要"包括语言这些"的类别,若不做来源区分就会滑向规格 33 禁止的伪造。条件 stamp 而不是每次写都 stamp,是为了避免重复扫描同一批无 tag 的 wav 就把全库分位无谓重建。
+**实测边界**:当前 93 首全是无 tag 的 wav,所以 `语种` 查询必然返回 `no-language-tag-in-library` / 空结果 + `tag_missing.language=93`,这是事实而非缺陷;`纯音乐` 则依赖 `has_vocal`(阈值化的估计值),因此 `filter_estimated` 会把它标出来——实测该过滤返回的 9 首里有 8 首从标题看是有唱的流行曲,即估计本身在这条上不可靠,标注只是不掩盖它,修正估计另列待办。
+**代价**:两列 + 一次新旧值比较;`SPACE_COLUMNS` 多两列(仍是小标量,不影响载荷估计的打分列集合)。

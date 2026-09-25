@@ -68,23 +68,67 @@ class Recommender:
         return out[:limit]
 
     # ---- category (Phase 4) ----
-    def categories(self) -> list[dict]:
-        return [{"id": c["id"], "name": c.get("name", c["id"])} for c in self.cfg.categories]
+    def _category_settings(self) -> dict:
+        return self.cfg.category_system or {}
 
     def _category_engine(self):
-        from .recommendation.category import CategoryEngine
+        from .recommendation.category import CategoryConfig, CategoryEngine
         if getattr(self, "_cat_engine", None) is None:
-            self._cat_engine = CategoryEngine(self._core.space)
+            ccfg = CategoryConfig.from_settings(self._category_settings().get("engine"))
+            self._cat_engine = CategoryEngine(self._core.space, ccfg)
         return self._cat_engine
 
-    def category(self, category_id: str, limit: int = 30) -> tuple[list[dict], dict]:
+    def discovered(self, force: bool = False) -> tuple[list[dict], dict]:
+        """Clusters found in the current library, as category specs (cached per library)."""
+        from .recommendation.discovery import DiscoveryConfig, discover
+        space = self._core.space
+        if force or space.discovery_cache is None:
+            dcfg = DiscoveryConfig.from_settings(self._category_settings().get("discovery"))
+            space.discovery_cache = discover(space, dcfg)
+        return space.discovery_cache
+
+    def categories(self, include_discovered: bool | None = None) -> list[dict]:
+        """Preset + (by default) discovered categories, each carrying its provenance."""
+        out = [dict(c, source=c.get("source", "preset")) for c in self.cfg.categories]
+        want = include_discovered if include_discovered is not None else \
+            bool((self._category_settings().get("discovery") or {}).get("include_in_listing", True))
+        if want:
+            specs, meta = self.discovered()
+            for s in specs:
+                out.append({"id": s["id"], "name": s["name"], "source": "discovered",
+                            "note": s["note"], "support": len(s["member_track_ids"]),
+                            "discovery": {k: meta.get(k) for k in ("k", "silhouette", "status")}})
+        return out
+
+    def _find_category(self, category_id: str) -> dict | None:
         cat = next((c for c in self.cfg.categories if c["id"] == category_id), None)
+        if cat is not None:
+            return cat
+        specs, _ = self.discovered()
+        return next((s for s in specs if s["id"] == category_id), None)
+
+    def category(self, category_id: str, limit: int = 30) -> tuple[list[dict], dict]:
+        cat = self._find_category(category_id)
         if cat is None:
             raise KeyError(f"unknown category_id: {category_id}")
         return self._run_category(cat, limit)
 
     def category_query(self, query: dict, hard_filter: dict | None = None, limit: int = 30) -> tuple[list[dict], dict]:
         return self._run_category({"id": "custom", "query": query, "hard_filter": hard_filter or {}}, limit)
+
+    def category_text(self, text: str, limit: int = 30) -> tuple[list[dict], dict]:
+        """Free Chinese text -> Music Space query. Unanswerable terms are reported, not mapped."""
+        from .recommendation.text_query import TextQueryConfig, parse
+        tcfg = TextQueryConfig.from_settings(self._category_settings().get("text"))
+        parsed = parse(text, self._core.space, tcfg)
+        items, meta = self._run_category(
+            {"id": "text", "query": parsed["query"], "hard_filter": parsed["hard_filter"]}, limit)
+        meta.update({k: parsed[k] for k in ("matched", "unmatched", "cleaned",
+                                           "genre_proxies", "vocal_proxies")})
+        # report the parsed request as the caller typed it, not as the engine narrowed it
+        meta["query"] = parsed["query"]
+        meta["hard_filter"] = parsed["hard_filter"]
+        return items, meta
 
     def _run_category(self, cat: dict, limit: int) -> tuple[list[dict], dict]:
         from pathlib import Path as _P

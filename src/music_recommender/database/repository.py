@@ -46,6 +46,7 @@ def upsert_track(conn: sqlite3.Connection, track_id: str, file_path: str,
         "album": tags.get("album"),
         "year": tags.get("year"),
         "language": tags.get("language"),
+        "genre": tags.get("genre"),
         # provenance of the four fields above: 'tag' = the file's own claim, never MIR output
         "meta_source": tags.get("meta_source", "none"),
         "file_size": size,
@@ -160,20 +161,35 @@ def paths_without_tags(conn: sqlite3.Connection) -> set[str]:
 
 
 def update_tags(conn: sqlite3.Connection, file_path: str, tags: dict) -> None:
-    """Write only the tag columns for an already-analysed file (no re-analysis)."""
+    """Write only the tag columns for an already-analysed file (no re-analysis).
+
+    `meta_updated_at` is stamped only when a value really changed, because the Music
+    Space cache keys off it and a plain re-scan of an unchanged library must not
+    invalidate every score.
+    """
+    before = conn.execute(
+        "SELECT title, artist, album, year, language, genre, meta_source FROM tracks "
+        "WHERE file_path=:file_path", {"file_path": str(file_path)}).fetchone()
+    if before is None:
+        return
+    new = {"file_path": str(file_path),
+           "title": tags.get("title"), "artist": tags.get("artist"),
+           "album": tags.get("album"), "year": tags.get("year"),
+           "language": tags.get("language"), "genre": tags.get("genre"),
+           "meta_source": tags.get("meta_source", "none")}
+    if all(before[k] == new[k] for k in new if k != "file_path"):
+        return
     conn.execute(
         "UPDATE tracks SET title=:title, artist=:artist, album=:album, year=:year, "
-        "language=:language, meta_source=:meta_source WHERE file_path=:file_path",
-        {"file_path": str(file_path),
-         "title": tags.get("title"), "artist": tags.get("artist"),
-         "album": tags.get("album"), "year": tags.get("year"),
-         "language": tags.get("language"), "meta_source": tags.get("meta_source", "none")},
+        "language=:language, genre=:genre, meta_source=:meta_source, "
+        "meta_updated_at=:now WHERE file_path=:file_path",
+        {**new, "now": _dt.datetime.now(_dt.timezone.utc).isoformat()},
     )
     conn.commit()
 
 
 def display_map(conn: sqlite3.Connection, track_ids) -> dict[str, dict]:
-    """{track_id: {title, artist, album, file_path, meta_source}} in one query.
+    """{track_id: {title, artist, album, language, genre, file_path, meta_source}} in one query.
 
     A player renders a recommendation list without N+1 requests, and `meta_source`
     travels with every row so the UI can never present a tag as analysed audio.
@@ -183,7 +199,8 @@ def display_map(conn: sqlite3.Connection, track_ids) -> dict[str, dict]:
         return {}
     q = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT track_id, title, artist, album, file_path, meta_source FROM tracks WHERE track_id IN ({q})",
+        f"SELECT track_id, title, artist, album, language, genre, file_path, meta_source "
+        f"FROM tracks WHERE track_id IN ({q})",
         ids,
     ).fetchall()
     return {r["track_id"]: dict(r) for r in rows}
@@ -214,16 +231,19 @@ def library_version(conn: sqlite3.Connection) -> tuple:
     """Fingerprint of the feature data behind the cached Music Space.
 
     Any upsert_track rewrites analyzed_at, so adding, removing or re-analysing a track
-    changes this value and invalidates the cache. Tag-only updates do not, and cannot:
-    tags are display data and no score reads them. MIN/MAX track_id are part of the
-    fingerprint so two different libraries can never collide on an equal row count and
-    timestamp -- in-memory and temp-file databases are both in play.
+    changes this value and invalidates the cache. Tag writes are covered too, but only
+    the ones that actually changed a value (`update_tags` stamps `meta_updated_at`):
+    language/genre are now read by category hard filters and by discovered-cluster
+    naming, so a tag backfill must not be able to leave a stale Music Space alive.
+    MIN/MAX track_id are part of the fingerprint so two different libraries can never
+    collide on an equal row count and timestamp -- in-memory and temp-file databases
+    are both in play.
     """
     r = conn.execute(
         "SELECT COUNT(*) AS c, MAX(rowid) AS r, MAX(analyzed_at) AS a, "
-        "MIN(track_id) AS lo, MAX(track_id) AS hi FROM tracks"
+        "MAX(meta_updated_at) AS m, MIN(track_id) AS lo, MAX(track_id) AS hi FROM tracks"
     ).fetchone()
-    return (r["c"], r["r"], r["a"], r["lo"], r["hi"])
+    return (r["c"], r["r"], r["a"], r["m"], r["lo"], r["hi"])
 
 
 def count_tracks(conn: sqlite3.Connection) -> int:

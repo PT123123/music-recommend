@@ -2,7 +2,21 @@
 
 本地音乐 MIR 特征提取与内容驱动推荐系统。按规格 Phase 1–7 逐竖切交付。
 
-## 在线打分路径 25 倍 + 移动端可行性验证(本次)
+## 类别发散:共享词表 + 库内聚类自动发现 + 小曲库诚实标注(本次)
+针对两条反馈——"给出的维度其实都是我自己选的,估计后续会听腻"和"曲库给得不多,小库里是否需要别的适配"——把类别从 6 条人工预设改成**三个来源共用一份词表**,并让自动类别的目标值来自曲库本身。新增 `docs/CATEGORIES.md`。
+
+- **共享词表 `recommendation/lexicon.py`(ADR-17)**:33 个可测维度、142 个中文词,是"特征列 ↔ 查询字段名 ↔ 中文词"的唯一事实源;预设类别校验、聚类命名、自由文本解析全部从它派生。`EXTRA_SPACE_COLUMNS` 也由它推导——这条改动顺手抓到一个真实缺陷:`vocal_pitch_variance` / `mid_pitch_ratio` / `spectral_flux_mean` / `crest_factor` / `chorus_energy` / `chorus_repeat_count` **六维从未被读进 Music Space**,所以任何以它们为目标的类别一直在给一个根本没加载的维度排序(新增断言 `spec.col in SPACE_COLUMNS` 守住)。
+- **聚类自动发现 `recommendation/discovery.py`**:分位空间 KMeans,k 按轮廓系数在 `[4,12]` 选,硬门槛每簇 ≥ `max(4, 4%×库)`;簇名取质心偏离中位最多的 3 个维度。**查询目标直接来自簇质心,不再手调分位**,因此曲库换了类别定义自动重标定。真实 93 首实测 `k=4 / 轮廓系数 0.106 / 4 簇(38·23·17·15)`,文档里明确写出"边界模糊,4 类是门槛内的全部结果,不是曲库确实分 4 类"。库太小则拒绝输出(`status: library-too-small`),不会造出单曲"类别"。
+- **自由中文文本 `recommendation/text_query.py` + `--text` / `text` 接口**:最长匹配、否定翻转目标(`不要快节奏` → 目标 0.15)、量不出来的词(治愈/高级感)进 `unmatched` 并附原因,不映射到相近维度。词表补齐了用户自己的说法:`节奏感强`、`重低音`、`低音重`、`念白`、`女生/男声`(见下)。
+- **小曲库诚实适配**:`support/candidate_pool/low_support/min_support`(低于 `max(5, 5%)` 标记)、`filters_applied` + `filter_estimated`、`unknown_filters`(写错的条件只报告不生效)、`tag_missing` 计数、`scored_dims/unscored_dims/filter_only`(过滤后没维度可排时如实说明,不再给全池 1.000 的假排名)。结果近重复压制改为贪心 `λ·相关 − (1−λ)·最大余弦`(默认 λ=0.8、余弦 >0.97 丢弃),没有 embedding 时不做并如实报 `deduped: False`。
+- **语种 / 曲风只读文件 tag(ADR-18)**:`tracks` 增 `genre` + `meta_updated_at`,`language_is`/`genre_is` 精确匹配,无 tag 时结果为空并回报缺失计数——**不假装能听出语种**。无 tag 可依时曲风退到 `GENRE_TERMS` 听感近似、`女声/男声` 退到 `VOCAL_PROXY_TERMS` 音区近似(性别没有任何本地特征能识别),两者在 `matched` 里标 `side="proxy"` 并在 CLI 明写"按…近似"。因为这两列现在被硬过滤和簇命名读取,`update_tags()` 仅在值真的变化时 stamp,`library_version()` 升级为**六元组**,tag 回填不可能留下陈旧 Music Space;重复写入相同 tag 不再让缓存失效(测试 `test_rescanning_unchanged_tags_does_not_invalidate_the_space` 守住)。
+- **修掉 `instrumental` 硬过滤缺陷**:旧实现把 `has_vocal` 的条件当"字段存在"处理,`纯音乐` 实际从未过滤任何人;现在 `HARD_FILTERS` 是谓词表,`_passes_hard` 支持谓词 / tag 相等 / 通用 `<col>_min|_max`,并新增反向对照(要人声必须给出补集)。诚实边界同时写明:当前 93 首里判为无人声的 9 首按文件名看 8 首是演唱曲,即该估计实测不可靠,所以它出现在 `filter_estimated` 里而不是被当成事实——修正估计本身另列待办。
+- **预设 6 → 22 条**(`configs/categories.yaml`),`config.yaml` 新增 `category_system: {engine, discovery, text, extra}` 一处调参,`extra` 按 id 覆盖出厂预设(用户加类别不必改出厂文件);新增 `scripts/categories.py`(列表 + `--refresh` + `--json`)。
+- 测试:新增 `tests/test_category_system.py` 23 项(合成 3 族 × 10 首、全词表列都填值,所以"预设类别必须可回答"是真断言而不是空跑)。按项目惯例每项都带反向对照,例如"未知过滤条件必须报告且不删任何人"、"没有 embedding 时 `deduped` 必须是 False 而不是谎称做过"。
+- **去重写第一版就被自己测出来两个问题**(见 `docs/PERFORMANCE.md` 第三轮):(1) Python 三重循环让 category 从 3.8 毫秒变成 **27 / 36 毫秒**,即"去重"本身就是那 7 倍退化——改成一次堆矩阵 + 每选一首一次矩阵向量乘,回到 5.5 毫秒;(2) 存的 embedding **不是单位长度**,`v @ c` 是内积不是余弦,配置里 0.97 这个阈值比的其实是模长,现在先 L2 归一,并由 `test_dedupe_similarity_is_an_angle_not_a_magnitude`(同方向、0.4 模长的重复必须被压掉)钉住。`deduped` 的语义同时收紧为"本轮确实因冗余丢了候选",另有 `duplicates_suppressed` 给条数。
+- 依赖:聚类走 `sklearn`(已装),惰性导入,缺失时 `status: no-sklearn` 并退回纯预设。
+
+## 在线打分路径 25 倍 + 移动端可行性验证(上次)
 把"能不能塞进手机"变成有数字的答案:先证明查询侧还能再快一个数量级,再把整条查询路径重写一份只依赖 std 的 Rust 实现,用逐位次比对证明两边等价。
 
 - **song→song 0.55 秒 → 21.8 毫秒**(ADR-15、ADR-16):

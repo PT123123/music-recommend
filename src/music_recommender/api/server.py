@@ -42,6 +42,7 @@ class CategoryRequest(BaseModel):
     category_id: str | None = None
     query: dict | None = None
     hard_filter: dict | None = None
+    text: str | None = None
     limit: int = 30
 
 
@@ -111,8 +112,17 @@ def create_app() -> FastAPI:
         return d
 
     @app.get("/v1/categories")
-    def categories():
-        return Recommender().categories()
+    def categories(include_discovered: bool = True):
+        return Recommender().categories(include_discovered=include_discovered)
+
+    @app.get("/v1/categories/discovery")
+    def categories_discovery(refresh: bool = False):
+        """Meta of the unsupervised pass: chosen k, silhouette, per-cluster vocal share."""
+        specs, meta = Recommender().discovered(force=refresh)
+        return {"meta": meta,
+                "categories": [{"id": s["id"], "name": s["name"], "source": "discovered",
+                                "note": s["note"], "support": len(s["member_track_ids"])}
+                               for s in specs]}
 
     @app.post("/v1/recommend/similar")
     def recommend_similar(req: SimilarRequest):
@@ -156,16 +166,34 @@ def create_app() -> FastAPI:
             if req.category_id:
                 items, meta = rec.category(req.category_id, limit=req.limit)
                 seed = req.category_id
+            elif req.text:
+                items, meta = rec.category_text(req.text, limit=req.limit)
+                seed = "text"
             elif req.query:
                 items, meta = rec.category_query(req.query, req.hard_filter, limit=req.limit)
                 seed = "custom_query"
             else:
-                raise HTTPException(400, "provide category_id or query")
+                raise HTTPException(400, "provide category_id, text or query")
         except KeyError as exc:
             raise HTTPException(404, str(exc))
-        return {"category": seed, "ignored_dims": meta.get("ignored", []),
-                "usable_dims": meta.get("usable", 0),
-                "recommendations": _with_display(items)}
+        out = {"category": seed, "ignored_dims": meta.get("ignored", []),
+               "usable_dims": meta.get("usable", 0),
+               "support": meta.get("support"), "low_support": meta.get("low_support"),
+               "candidate_pool": meta.get("candidate_pool"),
+               "filters_applied": meta.get("filters_applied", []),
+               "filters_estimated": meta.get("filter_estimated", []),
+               "unscored_dims": meta.get("unscored_dims", []),
+               "genre_proxies": meta.get("genre_proxies", []),
+               "vocal_proxies": meta.get("vocal_proxies", []),
+               "recommendations": _with_display(items)}
+        if meta.get("unknown_filters"):
+            out["unknown_filters"] = meta["unknown_filters"]
+        if meta.get("matched") is not None:
+            out["matched_terms"] = meta["matched"]
+            out["unmatched_terms"] = meta["unmatched"]
+        if meta.get("tag_missing"):
+            out["tag_missing_tracks"] = meta["tag_missing"]
+        return out
 
     @app.post("/v1/feed/next")
     def feed_next(req: FeedNextRequest):

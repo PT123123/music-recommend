@@ -37,6 +37,7 @@ categories:
 
   - id: high_female_vocal
     name: 极致高音女声
+    note: 依据人声音区/音域近似排序，本系统不识别性别
     hard_filter: { has_vocal: true }
     query:
       vocal_pitch_mean: 0.85
@@ -49,3 +50,128 @@ categories:
     query:
       vocal_pitch_mean: 0.20
       energy: 0.35
+
+  # --- Preset vocabulary expanded along the same honest rule: every field below is a
+  # column this project actually measures from the audio (see recommendation/lexicon.py).
+  # Words we cannot back with a measurement (语种/曲风名/情绪标签) are NOT here; they
+  # come from file tags at runtime, or are reported as an unanswerable term.
+  - id: instrumental
+    name: 纯音乐 / 无人声
+    hard_filter: { instrumental: true }
+    query:
+      vocal_ratio: 0.05
+      bass_energy_ratio: 0.5
+
+  - id: slow_ballad
+    name: 慢速抒情
+    hard_filter: { bpm_max: 85 }
+    query:
+      tempo: 0.15
+      energy: 0.35
+      brightness: 0.35
+
+  - id: fast_intense
+    name: 快速激烈
+    hard_filter: {}
+    query:
+      tempo: 0.90
+      rhythm_intensity: 0.85
+      energy: 0.80
+
+  - id: rap_like_flow
+    name: 说唱感（音域窄 + 节奏密，估计值）
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_pitch_range: 0.15
+      rhythm_intensity: 0.85
+      vocal_presence: 0.80
+
+  - id: whisper_soft
+    name: 轻声耳语
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_intensity: 0.12
+      energy: 0.12
+      dynamic_range: 0.20
+
+  - id: vocal_power
+    name: 人声爆发
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_intensity: 0.90
+      vocal_range: 0.80
+      energy: 0.85
+
+  - id: deep_bass_heavy
+    name: 低频厚重
+    hard_filter: {}
+    query:
+      bass_energy: 0.90
+      low_pitch_ratio: 0.80
+      brightness: 0.25
+
+  - id: bright_airy
+    name: 通透明亮
+    hard_filter: {}
+    query:
+      brightness: 0.90
+      contrast: 0.70
+      energy: 0.50
+
+  - id: dark_tense
+    name: 暗沉紧张
+    hard_filter: {}
+    query:
+      brightness: 0.15
+      dissonance: 0.80
+
+  - id: wide_dynamics
+    name: 大动态起伏
+    hard_filter: {}
+    query:
+      dynamic_range: 0.90
+      energy_variation: 0.85
+
+  - id: steady_groove
+    name: 稳定律动
+    hard_filter: {}
+    query:
+      beat_consistency: 0.90
+      danceability: 0.75
+      tempo_variance: 0.15
+
+  - id: harmonic_loop
+    name: 和声简单循环
+    hard_filter: {}
+    query:
+      chord_change_rate: 0.12
+      harmonic_rhythm: 0.15
+
+  - id: wide_melody
+    name: 旋律大跨度
+    hard_filter: {}
+    query:
+      melody_range: 0.90
+      pitch_variance: 0.80
+
+  - id: breathy_texture
+    name: 气声 / 沙哑质感
+    hard_filter: {}
+    query:
+      flatness: 0.85
+      zcr: 0.75
+
+  - id: chorus_lift
+    name: 副歌拉满
+    hard_filter: {}
+    query:
+      chorus_energy: 0.90
+      energy: 0.70
+
+  - id: speechy_vocal
+    name: 念白感人声
+    hard_filter: { has_vocal: true }
+    query:
+      vocal_pitch_variance: 0.12
+      vocal_presence: 0.75
+

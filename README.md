@@ -16,7 +16,7 @@ Music Representation / Music Space，并对外提供 **歌曲相似推荐**、**
 | Phase 1 | MP3/WAV → 标准化 → RMS/ZCR/频谱/MFCC/BPM/Chroma/Key → SQLite → PCA Embedding → FAISS → 歌曲到歌曲 | ✅ 已完成 |
 | Phase 2 | 和弦估算(转调不变)、旋律音高/音程、人声存在/音高、配器能量;并入 Metadata Re-ranking | ✅ 已完成(估算字段标 `estimated`) |
 | Phase 3 | 分段 / 能量曲线(64bin) / 副歌检测 / 结构相似(曲线相关 + 段序列) + `track_segments` 表 | ✅ 已完成 |
-| Phase 4 | 固定类别:`categories.yaml` → Music Space 区域(hard_filter + soft ranking),`/v1/recommend/category` + CLI | ✅ 已完成 |
+| Phase 4 | 类别推荐:22 条预设 + **曲库内聚类自动发现**(`auto-*`)+ 自由中文文本查询;类别 = Music Space 区域(hard_filter + soft ranking),`/v1/recommend/category` + CLI,见 `docs/CATEGORIES.md` | ✅ 已完成 |
 | Phase 5 | 动态 Feed:指数时间衰减 short/medium/long 兴趣、反馈、novelty/diversity(MMR)、近期去重、冷启动多样性 | ✅ 已完成 |
 | Phase 6 | Local HTTP API:health/tracks/categories/similar/scan/index + category/feed(next·feedback·state·reset)/evaluate | ✅ 已完成 |
 | Phase 7 | 人工评测:pairwise 标签记录 + 导出 `seed,recommendation,label` CSV + `/v1/evaluate` | ✅ 已完成 |
@@ -65,7 +65,7 @@ MVP 使用 **轻量占位方案**:`librosa 统计特征 → StandardScaler → P
 
 ```
 configs/     config.yaml(路径/音频/embedding/检索/feed 衰减权重) weights.yaml(推荐分组权重) categories.yaml(类别定义)
-docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈) PORTING.md(移动端可行性) DEPYTHON.md(去 Python 现状与三条路线)
+docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) CATEGORIES.md(类别:预设/自动发现/自由文本) PERFORMANCE.md(性能与瓶颈) PORTING.md(移动端可行性) DEPYTHON.md(去 Python 现状与三条路线)
 scripts/     CLI 入口(见下)
 src/music_recommender/
   preprocess/  音频标准化 (ffmpeg / librosa) + 内嵌 tag 读取 (mutagen)
@@ -104,6 +104,8 @@ python scripts/recommend.py data/test_music/bright_pop_1.wav --limit 5
 python scripts/recommend.py data/test_music/bright_pop_1.wav --json
 python scripts/recommend.py --track-id <id> --limit 10
 python scripts/recommend.py --category high_female_vocal            # 固定类别
+python scripts/recommend.py --text "来点安静又明亮的纯音乐"            # 自由中文 → 类别查询
+python scripts/categories.py                                       # 列出 22 条预设 + 自动发现的类别
 ```
 
 > 分析窗口:`configs/config.yaml` 的 `audio.max_analysis_seconds`(默认 45)会取每首曲子
@@ -141,9 +143,10 @@ python scripts/run_server.py --port 8000
 |------|------|------|
 | GET  | `/v1/health` | 健康检查 |
 | GET  | `/v1/tracks/{track_id}` | 返回完整 Music Representation(去除二进制数组) |
-| GET  | `/v1/categories` | 固定类别列表(来自 `categories.yaml`) |
+| GET  | `/v1/categories` | 类别列表:`categories.yaml` 的 22 条预设 + 聚类自动发现的 `auto-*`(带成员数与轮廓系数);`?include_discovered=0` 只要预设 |
+| GET  | `/v1/categories/discovery` | 聚类状态(k / 轮廓系数 / 特征维度 / 为什么拒绝输出),`?refresh=1` 重算 |
 | POST | `/v1/recommend/similar` | 歌曲到相似歌曲;body `{"track_id": "..."}` 或 `{"file_path": "..."}`,`limit` |
-| POST | `/v1/recommend/category` | 固定类别推荐:`{"category_id":"high_energy","limit":30}` 或参数化 `{"query":{"energy":0.85,"brightness":0.2},"hard_filter":{"has_vocal":false}}` |
+| POST | `/v1/recommend/category` | 类别推荐:`{"category_id":"high_energy","limit":30}`、自由中文 `{"text":"来点低沉人声"}`,或参数化 `{"query":{"energy":0.85,"brightness":0.2},"hard_filter":{"instrumental":true}}`;响应带 `support` / `low_support` / `filters_applied` / `filters_estimated` / `matched_terms` / `unmatched_terms` |
 | POST | `/v1/feed/next` | 动态 Feed 下一批:`{"user_id":"local-user","limit":20,"exclude_track_ids":[...]}` |
 | POST | `/v1/feed/feedback` | 反馈事件:`{"track_id":"...","event":"like\|dislike\|skip\|play\|complete\|replay\|partial\|impression","completion_ratio":0.9}` |
 | GET  | `/v1/feed/state` | 当前 short/medium/long 兴趣摘要(可解释) |
@@ -184,7 +187,9 @@ rec = Recommender()
 for r in rec.similar(track_id="...", limit=10):
     print(r.track_id, r.score, r.reasons)
 
-items, meta = rec.category("high_energy", limit=20)      # 固定类别
+items, meta = rec.category("high_energy", limit=20)      # 固定类别(预设或 auto-*)
+items, meta = rec.category_text("来点低沉人声", limit=20)  # 自由中文;meta 里有答不了的词与原因
+print(rec.categories())                                   # 预设 + 自动发现的类别清单
 rec.feedback("local-user", track_id="...", event="like") # 记录行为
 feed = rec.feed_next("local-user", limit=10)             # 动态 Feed(时间衰减)
 print(rec.feed_state("local-user"))                      # 可解释兴趣摘要
@@ -233,7 +238,8 @@ python -m pytest tests/test_query_perf.py -q      # 查询路径等价性:朴素
 
 | | 数值 |
 |---|---|
-| song→song / category / feed_next | **21.8 ms** / 3.8 ms / 3.3 ms |
+| song→song / category / feed_next | **21.8 ms**(负载下复测 29.5 ms)/ 5.5 ms / 3.3 ms |
+| 类别自动发现 | 93 首 34 维、k=4..12 全扫 **0.55 秒,每个库版本一次**(之后 0 成本) |
 | 离线抽取 | 43.1 秒/首(单进程,`pyin` 28.7 + `hpss` 5.9 占 80%);93 首 6 worker ≈ 22 分钟;重扫未变更曲库 0 秒 |
 | 打分载荷 | **1560 字节/首** + embedding 96 字节(整行 11,231 字节,其余是抽取中间量,查询不读)→ 5000 首约 8.3 MB |
 
@@ -263,7 +269,7 @@ cd rust/musicspace && cargo run --release -- data/portability --verify          
 
 ## 设计文档
 
-- `docs/ADR.md` — 关键设计决策(禁止伪造字段、Music Space 分位归一化、embedding 可替换、和弦转调不变、类别/Feed 共用核心、Feed 防坍缩、配置驱动、有界分析窗、内容稳定 track_id、tag 来源标注、**在线路径等价优化 + Rust 端口与反向对照(ADR-15)、Music Space 按库版本缓存(ADR-16)**)。
+- `docs/ADR.md` — 关键设计决策(禁止伪造字段、Music Space 分位归一化、embedding 可替换、和弦转调不变、类别/Feed 共用核心、Feed 防坍缩、配置驱动、有界分析窗、内容稳定 track_id、tag 来源标注、**在线路径等价优化 + Rust 端口与反向对照(ADR-15)、Music Space 按库版本缓存(ADR-16)、类别来自共享词表 + 库内聚类自动发现(ADR-17)、语种/曲风只来自 tag 且参与缓存失效(ADR-18)**)。
 - `docs/CHANGELOG.md` — Phase 1–7 逐竖切交付清单 + 之后每一轮的实测修正。
 - `docs/PERFORMANCE.md` — 实测耗时、复杂度、后续优化方向(含两次勘误的来龙去脉)。
 - `docs/PORTING.md` — 移动端可行性:载荷/算术实测、std-only Rust 端口的逐位次等价验证、已知边界与移植清单。

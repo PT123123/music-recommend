@@ -24,7 +24,7 @@ from music_recommender.database import repository                      # noqa: E
 from music_recommender.recommendation.sequence_sim import (            # noqa: E402
     levenshtein_similarity, ngram_similarity)
 from music_recommender.recommendation.space import (                   # noqa: E402
-    FEATURE_GROUPS, SEQUENCE_COLS, SPACE_COLUMNS, MusicSpace)
+    FEATURE_GROUPS, SEQUENCE_COLS, MusicSpace)
 from music_recommender.recommender import Recommender                  # noqa: E402
 from music_recommender.utils.config import get_config                  # noqa: E402
 
@@ -88,7 +88,12 @@ def main() -> None:
     faiss_dir = cfg.faiss_dir
     index_bytes = sum(p.stat().st_size for p in faiss_dir.iterdir() if p.is_file()) if faiss_dir.exists() else 0
     col_bytes = column_bytes(conn)
-    score_bytes = sum(col_bytes.get(c, 0) for c in SPACE_COLUMNS)
+    # Size of what a phone actually has to carry, i.e. the columns `export` writes.
+    # SPACE_COLUMNS is deliberately wider: it also covers category-only percentiles and
+    # tag columns that the pair-scoring path never reads.
+    exported_cols = sorted({c for cols in FEATURE_GROUPS.values() for c in cols}) \
+        + list(SEQUENCE_COLS.values()) + ["track_id", "has_vocal", "energy_curve"]
+    score_bytes = sum(col_bytes.get(c, 0) for c in exported_cols)
     seq_bytes = sum(col_bytes.get(c, 0) for c in SEQUENCE_COLS.values())
     emb_dim = int((faiss_dir / "embedding_dimension.txt").read_text()) if (faiss_dir / "embedding_dimension.txt").exists() else 0
 

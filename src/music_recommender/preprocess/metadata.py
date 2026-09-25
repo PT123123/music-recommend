@@ -23,6 +23,7 @@ _KEYS = {
     "album": ("album",),
     "albumartist": ("albumartist",),
     "language": ("language", "lang"),
+    "genre": ("genre",),
 }
 
 _YEAR_RE = re.compile(r"(1[0-9]{3}|20[0-9]{2}|30[0-9]{2})")
@@ -73,7 +74,7 @@ def _decodable(b: bytes) -> bool:
 
 
 def read_tags(file_path: Path | str) -> dict:
-    """Return {title, artist, album, year, language, meta_source}.
+    """Return {title, artist, album, year, language, genre, meta_source}.
 
     Values are None when the file carries no such tag; `meta_source` is 'tag' when
     at least one value came from the file, 'none' otherwise. Unsupported formats,
@@ -81,7 +82,7 @@ def read_tags(file_path: Path | str) -> dict:
     because tags are optional context and must never block analysis.
     """
     empty = {"title": None, "artist": None, "album": None, "year": None,
-             "language": None, "meta_source": "none"}
+             "language": None, "genre": None, "meta_source": "none"}
     p = Path(file_path)
     try:
         from mutagen import File as MutagenFile  # optional dependency, imported lazily

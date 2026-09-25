@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     duration REAL,
 
     language TEXT,
+    genre TEXT,
 
     rms_mean REAL, rms_std REAL, rms_p10 REAL, rms_p25 REAL,
     rms_p50 REAL, rms_p75 REAL, rms_p90 REAL, rms_max REAL,
@@ -72,7 +73,14 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- embedded metadata), 'none', or null for a legacy row. Kept separate from
     -- estimate_flags because tag data is *not* audio analysis: it is reported
     -- verbatim from the file and must never be presented as MIR-derived.
-    meta_source TEXT
+    meta_source TEXT,
+
+    -- Bumped only by tag writes. `language` / `genre` are read by category hard
+    -- filters and by discovered-cluster naming, so a tag-only update must still
+    -- invalidate the cached Music Space; `analyzed_at` deliberately does not move
+    -- when no audio was re-analysed.
+    meta_updated_at TEXT
+
 );
 
 -- PCA/nn embeddings live here so FAISS can be deleted and rebuilt without
@@ -145,6 +153,8 @@ _MIGRATIONS: dict[str, str] = {
     "file_mtime": "REAL",
     "year": "INTEGER",
     "meta_source": "TEXT",
+    "genre": "TEXT",
+    "meta_updated_at": "TEXT",
 }
 
 
