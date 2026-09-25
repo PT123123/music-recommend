@@ -20,6 +20,7 @@ dependencies = [
     "pyyaml",
     "ffmpeg-python",
     "mutagen",
+    "rapidfuzz",
 ]
 
 [tool.setuptools.packages.find]

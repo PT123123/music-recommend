@@ -65,3 +65,16 @@
 **决定**:`preprocess/metadata.read_tags()` 用 mutagen 读 title/artist/album/year/language,`tracks.meta_source` 记 `'tag'` 或 `'none'`;读不到就留 NULL——**不从文件名猜**歌名歌手,也不把 tag 内容混进 `estimate_flags`。HTTP 结果里的 `display` 块与 CLI 标签都带上来源可追溯性。
 **理由**:规格 4/81 禁止"用外部平台标签当推荐依据"和"为空字段编造值",但禁止的是**伪称音频分析得出**;文件自己携带的文本是事实,只要来源标注清楚就不是伪造。播放器集成也确实需要这些字段(否则列表只能显示文件名)。
 **实测边界**:用户的 `~/Music` 里 mp3 有 40/40 带 tag,而本次入库的 93 首 **wav 全部无 tag**(`meta_source='none'`),所以该曲库的标题列仍为空——这正是标注来源的意义:缺就是缺。
+
+## ADR-15 在线打分路径先做等价优化,再以 std-only Rust 参考实现验证可移植性
+**决定**:
+1. 查询侧(offline 抽取之外)的热点用**字节级等价**的方式优化,而不是换算法:编辑距离交给 `rapidfuzz`(C++,任意元素类型),`MusicSpace` 按库版本 `(COUNT, MAX(rowid), MAX(analyzed_at), MIN/MAX(track_id))` 做进程内缓存(见 ADR-16),`_score_pair` 每个分组只算一次,Feed 的 MMR 用一次矩阵乘代替逐对 numpy 标量调用。
+2. 整条在线路径(分位归一化 → 序列相似度 → 加权合并 → song→song 重排)另写一份 **只依赖 std 的 Rust 实现** `rust/musicspace`,输入是 `scripts/bench_portability.py --export` 导出的打分载荷,输出与 Python 的 top-20 逐位次比对。
+3. **离线抽取不做移植**(暂不搬 Rust/C++):`pyin` + `hpss` 占单首 43.1 秒里的 80%,那部分要换的是算法/模型(见 `docs/PORTING.md`),不是语言。
+**理由**:手机上不了 Python,而"能不能塞进手机"必须用数字回答——载荷 1560 B/首 + 96 B 向量,单查询 92 对 × 9 分组 ≈ 1.28 M 编辑距离格,Rust x86 release 实测 6.1 ms/查询。等价比对是这一结论的前提:如果两份实现排名不同,"能移植"就没有意义。
+**验证与代价**:`--verify` 里同时跑一个**反向对照**(把某个非 embedding 权重翻倍),对照必须报出差异,否则判为不可信并退出 1——纯 0 差异可能是比较根本没执行。实测:12 seed × 20 位次 = 240 slot,**顺序 0 处不一致、分数差 0.0e0**;对照抓到 183 处不一致。代价:Rust 端是打分载荷的**第二份实现**,分组定义/权重/混合系数必须从 `manifest.kv` 读而不是写死,`configs/weights.yaml` 改动后需重新 `--export`;导出物 `data/portability/` 是从私有曲库派生的特征指纹,不入库版本控制。
+
+## ADR-16 Music Space 是库版本相关的派生数据,按版本指纹缓存
+**决定**:`space.get_music_space(conn)` 用 `(sqlite 文件名, library_version)` 做 key 缓存全库分位;曲库变化(`library_version()` 的五元组任一不同)即重建,且一次只驻留一个库(`_CACHE.clear()`)。每次查询只读打分真正用到的列(`SPACE_COLUMNS`,由 `FEATURE_GROUPS` + `SEQUENCE_COLS` 推导,经 `PRAGMA table_info` 过滤)。
+**理由**:分位与曲库强绑定(ADR-2),但重建全库分位实测只要 **6.5 ms**(占第一轮 0.55 秒的 1.3%),而原先**每次查询都重建一次**并全表 `SELECT *`(含 `stat_vector`、`features_json` 等大列)。真正的瓶颈是纯 Python Levenshtein:它占 0.504 秒采样里的 **0.452 秒**,且当时 `_score_pair` 把每个分组算了两次(一次进分数、一次进 detail),所以先去掉重复计算(→0.206 秒量级)再换 rapidfuzz,当前查询 21.4 ms。少读列几乎不为查询省时间,它的价值是让载荷估计(1560 B/首)与实际查询行为一致。
+**代价**:长驻进程里同库并发写入时,缓存最多滞后一次 `library_version` 变化;`analyze` 写库后由版本号推进触发重建,不需要显式失效。

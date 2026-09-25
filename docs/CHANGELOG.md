@@ -2,7 +2,23 @@
 
 本地音乐 MIR 特征提取与内容驱动推荐系统。按规格 Phase 1–7 逐竖切交付。
 
-## 真实查询延迟修正 + 扫描/身份/元数据四项(本次)
+## 在线打分路径 25 倍 + 移动端可行性验证(本次)
+把"能不能塞进手机"变成有数字的答案:先证明查询侧还能再快一个数量级,再把整条查询路径重写一份只依赖 std 的 Rust 实现,用逐位次比对证明两边等价。
+
+- **song→song 0.55 秒 → 21.8 毫秒**(ADR-15、ADR-16):
+  - `recommendation/sequence_sim.py` 的编辑距离交给 `rapidfuzz`(C++,任意 token 类型)。消融很干净:在当前代码上把它换回纯 Python 行 DP,单次查询 **21.4 → 227.7 毫秒**,即这一项占剩余成本的 91%。旧实现还把每个分组算两遍(一次进分数、一次进 detail),`core.py` 改为单次计算后 DP 单元数减半——两者相加才是 0.452 秒 → 0.206 秒的关系。
+  - `recommendation/space.py` 新增 `get_music_space()` 进程内缓存,key 为 `(sqlite 文件名, library_version)`,`repository.library_version()` 用五元组 `(COUNT, MAX(rowid), MAX(analyzed_at), MIN/MAX(track_id))` 做版本指纹;曲库变即重建,一次只驻留一个库。顺带修正了旧结论:**全库分位重建只要 6.5 毫秒**,它从来不是那 0.55 秒的来源。
+  - 查询改为只读打分列:`SPACE_COLUMNS` 由 `FEATURE_GROUPS` + `SEQUENCE_COLS` 推导(加一个分组自动进查询,无需维护第二份清单),经 `PRAGMA table_info` 过滤后走 `repository.rows_with_columns()`。
+- **feed_next 0.099 → 3.3 毫秒、category 0.026 → 3.8 毫秒**(ADR-15):`interest/feed.py` 的 MMR 从"每对候选 × 每首已选调一次 `np.linalg.norm`"(93 首库 20 项批次约 15 万次 numpy 标量调用)改成一次矩阵乘 + 布尔掩码索引;`_cold_start()` 用最远点采样的向量化版本,质心取 `argmin(‖M − centroid‖)`。
+- **修掉一个向量化引入的静默语义缺陷**:`dmax` 以 0 初值 `np.maximum` 累积 `1 - cos`,而候选与已选歌**反相关时 `1 - cos` 会大于 1**,钳在 1.0 就压平了整批多样性分数——A/B 里表现为 feed 第 1 步赢家改变(旧实现该位置 div = 1.4637)。改为 `have_sel` 标志 + 精确逐对公式。广播形状错的另两类会抛异常当场暴露,这一类只改语义、静默通过。
+- **等价性优先于速度**:基线 worktree(上一个提交)+ 冻结 `time.time` + 同一份真实 DB 副本,逐位次 A/B 比对排名与分数;`rapidfuzz` 对教材版行 DP、`group_similarity` 对朴素参考实现逐组逐对(>1000 次比较)断言 `<1e-12`,feed MMR 与冷启动同法验证 → 新增 `tests/test_query_perf.py`(7 项)。其中 feed 的 fixture 刻意把 embedding 摆在圆周上并断言 `best_div > 1.0`,否则它根本抓不到上面那个钳位缺陷。
+- **可移植性实测**:`scripts/bench_portability.py` 回答三件事——载荷(打分列 **1560 字节/首** + embedding 96 字节,整行 11,231)、算术(92 对 × 9 分组,约 **1.28 M** 编辑距离格/查询)、等价(`--export` 写出无 JSON 的 `tracks.tsv` + `manifest.kv` + `expected_top20.tsv`)。5000 首约 **8.3 MB** 打分载荷,音频除外。
+- **`rust/musicspace`(只依赖 std 的端口)**:分位(`partition_point`)、interned-token Levenshtein、n-gram/Jaccard/transition 计数、能量曲线 Pearson 混合、分组加权重排、f32 累加以对齐 FAISS 余弦。`--verify` 实测 **12 seed × 20 位次 = 240 slot,顺序 0 处不一致、分数差 0.0e0**,`median 6.09 ms/query`、加载 2.9 毫秒。**同一命令内置反向对照**:把一个非 embedding 权重翻倍后必须抓出差异(实测 183 处),否则退出 1 —— "0 不一致"若是比了个空就毫无意义。
+- **诚实边界**(写进 `docs/PORTING.md`):端口目前只覆盖 song→song,`category` / `feed_next` 尚未移植;93 首 < `faiss_top_k: 200` 使两边候选集恒等,库变大后必须连两阶段召回一起移植,否则这份等价性不覆盖那条路径;**离线抽取不要搬手机**(单首 43.1 秒里 pyin 28.7 + hpss 5.9,是 librosa 的算法成本),手机形态是"抽取在桌面/服务器、设备只做查询"。
+- 依赖:`requirements.txt` / `pyproject.toml` 增加 `rapidfuzz`。`.gitignore` 增加 `data/portability/`(私有曲库的特征指纹,只有内容哈希与浮点,但仍属"你听过什么")与 `rust/**/target/`。
+- 文档:新增 `docs/PORTING.md`;`docs/ADR.md` 增 ADR-15(等价优化 + 端口 + 反向对照)、ADR-16(Music Space 按库版本缓存);`docs/PERFORMANCE.md` **第二次勘误**——旧文把 0.55 秒归因于"重建分位 + 纯 Python Levenshtein",实测分位只占 1.3%,归错方向会去优化一个 1% 的东西。
+
+## 真实查询延迟修正 + 扫描/身份/元数据四项
 在真实曲库上把"查询亚秒级"这句未经核实的声明拆开验证,发现并修掉四项,同时补上文件自带元数据的读取。
 
 - **song→song 266 秒 → ~0.55 秒**(ADR-10):旋律序列原本逐帧存,真实曲目 2677–4015 token,Levenshtein 是 O(n·m) 纯 Python,20 候选实测 **266 秒**。新增 `features.max_sequence_tokens`(120)均匀降采样预算 + `melody._note_events()` 先把 pyin 轨迹转成音级事件;`interval_histogram` 仍按全量事件统计,不被预算截断。93 首真实库最终实测 10 次均值 **0.55 秒**(最大 0.65 秒),category 0.026 秒、feed 0.099 秒。

@@ -12,3 +12,5 @@ pydantic
 pyyaml
 ffmpeg-python
 mutagen
+# C++ edit distance over token sequences; the rerank hot path (see docs/PERFORMANCE.md)
+rapidfuzz

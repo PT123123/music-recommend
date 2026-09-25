@@ -10,7 +10,13 @@ data/normalized_audio/
 data/sqlite/
 data/faiss/
 data/test_music/
+# Derived feature fingerprint of the private library (see docs/PORTING.md)
+data/portability/
 logs/
+
+# Rust build artifacts
+rust/target/
+rust/**/target/
 
 # Quarantined old DB/index copies (contain absolute local paths)
 .quarantine*/

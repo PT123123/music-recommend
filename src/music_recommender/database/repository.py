@@ -193,6 +193,39 @@ def all_tracks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM tracks ORDER BY track_id").fetchall()
 
 
+def track_columns(conn: sqlite3.Connection) -> list[str]:
+    return [r[1] for r in conn.execute("PRAGMA table_info(tracks)")]
+
+
+def rows_with_columns(conn: sqlite3.Connection, columns: tuple[str, ...] | list[str]) -> list[sqlite3.Row]:
+    """Load only the named feature columns.
+
+    The caller owns the column list; columns absent from the schema are dropped rather
+    than raising, so an older database file still loads.
+    """
+    have = set(track_columns(conn))
+    cols = [c for c in columns if c in have]
+    if not cols:
+        return []
+    return conn.execute("SELECT {} FROM tracks ORDER BY track_id".format(", ".join(cols))).fetchall()
+
+
+def library_version(conn: sqlite3.Connection) -> tuple:
+    """Fingerprint of the feature data behind the cached Music Space.
+
+    Any upsert_track rewrites analyzed_at, so adding, removing or re-analysing a track
+    changes this value and invalidates the cache. Tag-only updates do not, and cannot:
+    tags are display data and no score reads them. MIN/MAX track_id are part of the
+    fingerprint so two different libraries can never collide on an equal row count and
+    timestamp -- in-memory and temp-file databases are both in play.
+    """
+    r = conn.execute(
+        "SELECT COUNT(*) AS c, MAX(rowid) AS r, MAX(analyzed_at) AS a, "
+        "MIN(track_id) AS lo, MAX(track_id) AS hi FROM tracks"
+    ).fetchone()
+    return (r["c"], r["r"], r["a"], r["lo"], r["hi"])
+
+
 def count_tracks(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) AS c FROM tracks").fetchone()["c"]
 

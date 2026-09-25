@@ -13,7 +13,7 @@ import numpy as np
 
 from ..utils.config import Config, get_config
 from ..utils.logging import get_logger
-from .space import GROUP_REASON, MusicSpace
+from .space import GROUP_REASON, get_music_space
 
 log = get_logger()
 
@@ -35,7 +35,7 @@ class Recommender:
         self.faiss = faiss_store
         self.cfg = cfg or get_config()
         self.weights = weights or self.cfg.active_weights()
-        self.space = MusicSpace(conn)
+        self.space = get_music_space(conn)
 
     # ---- query construction ----
     def _seed_vector(self, track_id: str) -> np.ndarray | None:
@@ -61,23 +61,25 @@ class Recommender:
         return pool
 
     def _score_pair(self, seed_id: str, cand_id: str, emb_sim: float | None) -> Recommendation:
+        # Each group similarity is computed exactly once and reused for the score, the
+        # breakdown and the reasons; scoring it twice per pair doubled every rerank cost.
+        detail: dict[str, float | None] = {}
         contributions: dict[str, float] = {}
         for group, weight in self.weights.items():
             if group == "embedding":
                 if emb_sim is None:
                     continue
-                contributions["embedding"] = weight * emb_sim
+                detail["embedding"] = float(emb_sim)
             else:
                 sim = self.space.group_similarity(seed_id, cand_id, group)
                 if sim is None:
                     continue
-                contributions[group] = weight * sim
+                detail[group] = sim
+            contributions[group] = weight * detail[group]
         total_weight = sum(self.weights[g] for g in contributions)
         score = (sum(contributions.values()) / total_weight) if total_weight > 0 else 0.0
 
         reasons = []
-        detail = {g: (self.space.group_similarity(seed_id, cand_id, g) if g != "embedding" else emb_sim)
-                  for g in contributions}
         ranked = sorted(contributions.items(), key=lambda kv: kv[1], reverse=True)
         for g, _ in ranked:
             if g == "embedding":
@@ -85,7 +87,8 @@ class Recommender:
             elif detail.get(g) is not None and detail[g] >= REASON_MIN_SIM:
                 reasons.append(GROUP_REASON.get(g, g))
         return Recommendation(track_id=cand_id, score=round(float(score), 4),
-                              reasons=reasons[:4], breakdown={k: round(v, 3) for k, v in detail.items() if v is not None})
+                              reasons=reasons[:4],
+                              breakdown={k: round(v, 3) for k, v in detail.items() if v is not None})
 
     # ---- public: song -> song ----
     def similar(self, track_id: str, limit: int = 20) -> list[Recommendation]:

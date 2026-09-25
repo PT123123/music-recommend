@@ -1,0 +1,11 @@
+[package]
+name = "musicspace"
+version = "0.1.0"
+edition = "2021"
+description = "Std-only port of the online scoring path, used to prove a mobile build is feasible"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

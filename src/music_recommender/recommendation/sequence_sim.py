@@ -7,20 +7,21 @@ from __future__ import annotations
 
 from collections import Counter
 
+from rapidfuzz.distance import Levenshtein as _Levenshtein
+
 
 def levenshtein_similarity(a: list, b: list) -> float:
-    if not a and not b:
-        return 1.0
+    """Edit distance on token sequences, normalized to a [0,1] similarity.
+
+    rapidfuzz computes this in C++ over arbitrary element types (verified equal
+    to the textbook row DP on randomized pairs, see tests/test_query_perf.py) and
+    orders of magnitude faster, which is what makes reranking a real library affordable:
+    120x120 token cells used to dominate every query.
+    """
     m, n = len(a), len(b)
-    prev = list(range(n + 1))
-    for i in range(1, m + 1):
-        cur = [i] + [0] * n
-        for j in range(1, n + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-        prev = cur
-    dist = prev[n]
-    return 1.0 - dist / max(m, n)
+    if not m and not n:
+        return 1.0
+    return 1.0 - _Levenshtein.distance(a, b) / max(m, n)
 
 
 def ngram_similarity(a: list, b: list, n: int = 2) -> float:

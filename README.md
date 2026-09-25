@@ -21,7 +21,7 @@ Music Representation / Music Space，并对外提供 **歌曲相似推荐**、**
 | Phase 6 | Local HTTP API:health/tracks/categories/similar/scan/index + category/feed(next·feedback·state·reset)/evaluate | ✅ 已完成 |
 | Phase 7 | 人工评测:pairwise 标签记录 + 导出 `seed,recommendation,label` CSV + `/v1/evaluate` | ✅ 已完成 |
 
-> **诚实性 & 性能**:和弦/旋律/人声/结构均为 librosa/CPU **估算**(带 `estimate_flags` 与置信度),接口可替换为专用模型。Phase 2–3 引入 `pyin`+`hpss`,CPU 抽取约每首数秒(本机 12 首 ≈2.5–3 分钟);大库可用 `config.yaml` 限制分析窗口或改批量 GPU 模型。
+> **诚实性 & 性能**:和弦/旋律/人声/结构均为 librosa/CPU **估算**(带 `estimate_flags` 与置信度),接口可替换为专用模型。Phase 2–3 引入 `pyin`+`hpss` 后,**真实曲库实测 43.1 秒/首**(单进程;其中 pyin 28.7 秒),合成 4 秒短片才是十几秒一首——早期文档写的"每首数秒"是短片结论,已改正。大库抽取必须并行 + 增量(`--workers 6` 下 93 首 ≈22 分钟,重扫 0 秒),或换更便宜的 f0/CQT 方案。查询侧已优化到 **20 毫秒量级**并可脱离 Python 运行,见「性能与可移植性」。
 
 设计遵循规格「实现原则」:模型可替换(`AudioEmbedder` 接口)、SQLite 为事实来源、FAISS
 仅为可重建缓存、不满足字段不伪造、配置化权重与阈值。
@@ -34,6 +34,8 @@ Music Representation / Music Space，并对外提供 **歌曲相似推荐**、**
   scikit-learn 目前无对应 wheel。
 - **FFmpeg**(用于 MP3 解码标准化)。Windows 可用 `winget install Gyan.FFmpeg`。
   若不在 PATH,librosa 会通过 `audioread` 回退解码(可能给出 deprecation 警告,功能正常)。
+- **可选:Rust(仅 `rust/musicspace` 端口需要)**,`cargo` 稳定版即可。该 crate 只依赖 std,
+  不联网拉 crates.io;主引擎不需要它。
 
 ### 安装依赖(使用 uv,推荐)
 
@@ -63,7 +65,7 @@ MVP 使用 **轻量占位方案**:`librosa 统计特征 → StandardScaler → P
 
 ```
 configs/     config.yaml(路径/音频/embedding/检索/feed 衰减权重) weights.yaml(推荐分组权重) categories.yaml(类别定义)
-docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈)
+docs/        ADR.md(设计决策) CHANGELOG.md(Phase 1-7 交付) PERFORMANCE.md(性能与瓶颈) PORTING.md(移动端可行性)
 scripts/     CLI 入口(见下)
 src/music_recommender/
   preprocess/  音频标准化 (ffmpeg / librosa) + 内嵌 tag 读取 (mutagen)
@@ -75,6 +77,7 @@ src/music_recommender/
   interest/    InterestModel(时间衰减兴趣)+ FeedEngine(无脑流)
   api/         FastAPI 服务器
 data/        normalized_audio/  sqlite/  faiss/  test_music/(合成测试音频)
+rust/musicspace/ 在线打分路径的 std-only Rust 端口(移动端可行性验证,见 docs/PORTING.md)
 logs/        pipeline.log  errors.log
 tests/       pytest 套件 + 端到端校验
 ```
@@ -221,6 +224,24 @@ python tests/verify_mvp.py                       # 期望 VERDICT: PASS(12/12)
 python -m pytest tests/test_pipeline.py -q        # 管线 / embedding / FAISS / 推荐 / 评测
 python -m pytest tests/test_scan_identity.py -q   # 扫描身份 / tag 读取 / 增量跳过 / 序列预算 / DSP 去重
 python -m pytest tests/test_feed.py -q            # Feed 时间衰减 + 差分喜欢偏好
+python -m pytest tests/test_query_perf.py -q      # 查询路径等价性:朴素参考实现逐位比对(rapidfuzz / 分组相似度 / MMR / 冷启动)
+```
+
+## 性能与可移植性
+
+真实曲库 93 首 WAV 实测(`docs/PERFORMANCE.md` 有全过程与两次勘误):
+
+| | 数值 |
+|---|---|
+| song→song / category / feed_next | **21.8 ms** / 3.8 ms / 3.3 ms |
+| 离线抽取 | 43.1 秒/首(单进程,`pyin` 28.7 + `hpss` 5.9 占 80%);93 首 6 worker ≈ 22 分钟;重扫未变更曲库 0 秒 |
+| 打分载荷 | **1560 字节/首** + embedding 96 字节(整行 11,231 字节,其余是抽取中间量,查询不读)→ 5000 首约 8.3 MB |
+
+关于"能不能塞进手机":**在线打分路径已用 std-only Rust 重写并验证与 Python 排名逐位一致**(12 seed × 20 位次 = 240 slot,0 处顺序不一致、分数差 0,Rust 6.1 ms/查询);命令内置**反向对照**,故意改坏一个权重必须被抓出,否则判定不成立。**离线抽取不搬手机**——那是 librosa 的算法成本,不是语言成本。手机形态 = 桌面抽取、设备只查询。完整论证、边界与移植清单见 `docs/PORTING.md`。
+
+```bash
+PYTHONPATH=src python scripts/bench_portability.py --json                       # 载荷/算术实测 + 导出比对物
+cd rust/musicspace && cargo run --release -- data/portability --verify          # 等价性 + 反向对照 + 计时
 ```
 
 ## 故障处理
@@ -242,6 +263,7 @@ python -m pytest tests/test_feed.py -q            # Feed 时间衰减 + 差分�
 
 ## 设计文档
 
-- `docs/ADR.md` — 关键设计决策(禁止伪造字段、Music Space 分位归一化、embedding 可替换、和弦转调不变、类别/Feed 共用核心、Feed 防坍缩、配置驱动)。
-- `docs/CHANGELOG.md` — Phase 1–7 逐竖切交付清单。
-- `docs/PERFORMANCE.md` — 实测耗时、复杂度、后续优化方向。
+- `docs/ADR.md` — 关键设计决策(禁止伪造字段、Music Space 分位归一化、embedding 可替换、和弦转调不变、类别/Feed 共用核心、Feed 防坍缩、配置驱动、有界分析窗、内容稳定 track_id、tag 来源标注、**在线路径等价优化 + Rust 端口与反向对照(ADR-15)、Music Space 按库版本缓存(ADR-16)**)。
+- `docs/CHANGELOG.md` — Phase 1–7 逐竖切交付清单 + 之后每一轮的实测修正。
+- `docs/PERFORMANCE.md` — 实测耗时、复杂度、后续优化方向(含两次勘误的来龙去脉)。
+- `docs/PORTING.md` — 移动端可行性:载荷/算术实测、std-only Rust 端口的逐位次等价验证、已知边界与移植清单。
