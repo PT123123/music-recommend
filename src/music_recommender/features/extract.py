@@ -10,7 +10,11 @@ from typing import Any, Optional
 
 import numpy as np
 
-from . import acoustic, harmony, melody, rhythm, structure
+from . import acoustic, dynamics, harmony, melody, rhythm, structure
+from . import dynamic_profiles as dprof_mod
+from . import description as description_mod
+from . import spatial as spatial_mod
+from . import texture as texture_mod
 from . import instruments as instr
 from . import vocal as vocal_mod
 
@@ -49,15 +53,47 @@ def _analysis_window(y: np.ndarray, sr: int, max_seconds: float) -> tuple[np.nda
 
 
 def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
+    """Two analysis scopes on purpose (plan stage B.1).
+
+    Cheap frame-level DSP (RMS, bands, onset, chroma) runs on the COMPLETE track so the
+    dynamics curves and section boundaries describe the song, not a slice. The expensive
+    features (pyin pitch, chord CQT, vocal/instrument decomposition) stay restricted to the
+    configurable loudest window, because their cost dominates and a 45 s representative
+    slice is enough for the similarity scalars. `analysis_window` records which slice.
+    """
     import librosa
 
     from ..utils.config import get_config
 
-    y, sr = librosa.load(wav_path, sr=sr, mono=True)
-    max_sec = float(get_config().audio.get("max_analysis_seconds", 0) or 0)
-    y, win_start, win_end = _analysis_window(y, sr, max_sec)
-    cfgf = get_config().features
+    cfg = get_config()
+    y_full, sr = librosa.load(wav_path, sr=sr, mono=True)
+    max_sec = float(cfg.audio.get("max_analysis_seconds", 0) or 0)
+    y, win_start, win_end = _analysis_window(y_full, sr, max_sec)
+    cfgf = cfg.features
     seq_budget = int(cfgf.get("max_sequence_tokens", 120))
+
+    # ---- full-track scope: dynamics + structure ----
+    acfg = {"analysis": cfg.analysis}
+    frames = dynamics.frame_curves(y_full, sr, acfg)
+    dyn = dynamics.track_dynamics(y_full, sr, acfg, frames=frames)
+    st = structure.structure_features(y_full, sr, acfg, frames=frames)
+
+    # ---- P1 扩展模块：纹理 / 空间 / 局部律动 / 轮廓 / 描述 ----
+    # 纹理与律动时间线走与 dynamics 相同的桶网格约定；空间只在原声道分支
+    # 解码成功时可用（单声道/多声道如实报 unavailable，绝不伪造立体声分析）。
+    tex = texture_mod.texture_curves(y_full, sr, acfg)
+    rhy = rhythm.rhythm_timeline(y_full, sr, acfg)
+    stereo = None
+    if bool(cfg.analysis.get("stereo", True)):
+        try:
+            stereo = librosa.load(wav_path, sr=sr, mono=False)[0]
+        except Exception:
+            stereo = None
+    spa = spatial_mod.spatial_curves(stereo, sr, acfg) if stereo is not None \
+        else {"status": "unavailable", "reason": "stereo_decode_failed", "curves": {}, "valid": [], "meta": {}}
+    prof = dprof_mod.summarize_dynamic_profiles(dyn, st.get("segment_list", []),
+                                                dyn.get("events", []), acfg)
+    desc = description_mod.describe(dyn, tex, spa, rhy, prof, st.get("segment_list", []), acfg)
 
     # hpss and pyin are each computed ONCE here and injected into the modules that
     # need them. They previously ran per-module (pyin x2, hpss x3), which dominated
@@ -72,7 +108,9 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     feats = TrackFeatures()
     feats.scalars["duration"] = float(duration)
     feats.extras["analysis_window"] = [win_start, win_end]
-    feats.scalars.update(acoustic.energy_features(y))
+    # Loudness scalars come from the full track: p10/p90 of a 45 s window cannot see the
+    # quiet intro or the outro, which biased `dynamic_range` towards the loudest section.
+    feats.scalars.update(acoustic.energy_features(y_full, rms=frames["rms"]))
     feats.scalars.update(acoustic.spectral_features(y))
     feats.scalars.update(rhythm.rhythm_features(y, sr))
 
@@ -124,24 +162,82 @@ def extract(wav_path: str, sr: int, duration: float) -> TrackFeatures:
     feats.extras["vocal_confidence"] = vc.get("vocal_confidence")
     feats.extras["vocal_periodicity"] = vc.get("vocal_periodicity")
 
-    # --- Phase 3 structure features ---
-    st = structure.structure_features(y, sr, separated=separated)
+    # --- full-track structure + dynamics (plan stage B/C) ---
     feats.scalars["segment_type_sequence"] = st.get("segment_type_sequence")
     feats.scalars["chorus_repeat_count"] = st.get("chorus_repeat_count")
     feats.scalars["chorus_energy"] = st.get("chorus_energy")
     feats.extras["segment_list"] = st.get("segment_list", [])
     feats.extras["energy_curve"] = st.get("energy_curve", [])
-    # chorus-restricted chord progression (spec section 9: chorus_chord_sequence)
-    if st.get("chorus_start") is not None and len(y) > sr:
+    feats.extras["group_sequence"] = st.get("group_sequence", "")
+    feats.extras["duration_ratios"] = st.get("duration_ratios", [])
+    # dynamics_json 升级为多模块载荷：dynamics 保持旧键（旧客户端读它不受影响），
+    # 新模块并排放同层；repository.get_analysis 负责兼容旧的单层格式。
+    deep_cfg = cfg.analysis.get("deep", {}) or {}
+    deep_enabled = bool(deep_cfg.get("enabled", False))
+    from ..models import source_separator, structure_labeler
+    feats.extras["dynamics"] = {
+        "dynamics": dyn,
+        "texture": tex,
+        "spatial": spa,
+        "rhythm_timeline": rhy,
+        "profiles": prof,
+        "description": desc,
+        "modules": {
+            "dynamics": "ready",
+            "structure": "ready",
+            "texture": "ready",
+            "rhythm_timeline": "ready",
+            "profiles": "ready",
+            "description": "ready",
+            "spatial": spa.get("status", "unavailable") if spa.get("status") == "ready"
+                       else f"unavailable:{spa.get('reason', 'unknown')}",
+            "deep_structure_labels": structure_labeler.AllInOneStructureLabeler().status()["status"]
+                                     if deep_enabled else "not_requested",
+            "deep_source_separation": source_separator.DemucsSourceSeparator().status()["status"]
+                                      if deep_enabled else "not_requested",
+        },
+    }
+    # meta only -- segments/dynamics/energy_curve own dedicated columns, and repeating
+    # them here would put a few thousand numbers inside features_json.
+    feats.extras["analysis"] = {
+        "analysis_version": int(cfg.analysis.get("version", 5)),
+        "analysis_scope": "full_track",
+        "duration_seconds": round(float(duration), 3),
+        "feature_window_seconds": [round(win_start, 3), round(win_end, 3)],
+        "alignment": st.get("alignment"),
+        "tempo_bpm": st.get("tempo_bpm"),
+        "segment_count": len(st.get("segments", [])),
+        "group_count": st.get("group_count"),
+        "group_sequence": st.get("group_sequence", ""),
+        "event_count": len((dyn or {}).get("events", [])),
+        "label_source": st.get("label_source"),
+        "labels_are_estimates": st.get("labels_are_estimates", True),
+    }
+    # chorus-restricted chord progression (spec section 9: chorus_chord_sequence).
+    # Slice the FULL track: chorus_start/end are now real song timestamps, not window offsets.
+    if st.get("chorus_start") is not None and len(y_full) > sr:
         cs = int(st["chorus_start"] * sr)
-        ce = int(min(st.get("chorus_end", duration) * sr, len(y)))
+        ce = int(min(st.get("chorus_end", duration) * sr, len(y_full)))
         if ce - cs > int(0.5 * sr):
-            hm_c = harmony.estimate_chords(y[cs:ce], sr)
+            hm_c = harmony.estimate_chords(y_full[cs:ce], sr)
             rel_c = harmony.relative_sequence(hm_c.get("chord_roots", []), hm_c.get("chord_qualities", []), key, mode)
             feats.scalars["chorus_chord_sequence"] = ",".join(melody.cap_sequence(hm_c.get("chord_sequence", []), seq_budget))
             feats.extras["chorus_relative_sequence"] = melody.cap_sequence(rel_c, seq_budget)
 
-    feats.estimated_fields = ["chord", "melody_pitch", "vocal_presence", "instrument_energy", "structure"]
+    # What each proxy column actually measures, so a client can label it correctly instead of
+    # calling `drum_energy_ratio` "drums" (plan stage A.3).
+    feats.extras["field_meaning"] = {
+        "drum_energy_ratio": "HPSS 打击性成分占比，不是鼓组轨道或鼓声音量",
+        "bass_energy_ratio": "20-250 Hz 能量占比，不等于 bass 吉他/合成器",
+        "vocal_ratio": "低置信人声存在启发式（voice-band 能量 × 谐波 RMS），非分离结果",
+        "vocal_gender": "unknown：本引擎不臆造性别标签",
+        "onset_density": "onset 包络积分，编曲密度的代理量",
+        "segment_type_sequence": "重复分组启发式得到的功能标签，未校准，unknown 表示证据不足",
+        "energy_curve": "全曲响度曲线（按最大值归一），绝对尺度在 dynamics.rms_db",
+        "confidence": "模型分数，非概率；未经人工标注校准",
+    }
+    feats.estimated_fields = ["chord", "melody_pitch", "vocal_presence", "instrument_energy",
+                              "structure", "dynamics_events"]
     feats.stat_vector = _build_stat_vector(feats)
     return feats
 

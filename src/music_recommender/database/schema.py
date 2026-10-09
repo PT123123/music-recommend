@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS tracks (
 
     segment_list TEXT, segment_type_sequence TEXT, chorus_repeat_count INTEGER,
     chorus_energy REAL, energy_curve TEXT,
+    -- Full-track analysis (docs/MUSIC_ANALYSIS_REFACTOR_PLAN.md 3). `analysis_version` is the
+    -- cache key that tells a reader whether this row predates the current segmentation
+    -- algorithm; `dynamics_json` holds the time-stamped curves + events, which are too big to
+    -- re-parse per recommendation, so the small sequence columns above stay the scoring path.
+    analysis_version TEXT, group_sequence TEXT, duration_ratios TEXT, dynamics_json TEXT,
 
     has_vocal INTEGER, vocal_ratio REAL, vocal_gender TEXT,
     vocal_pitch_mean REAL, vocal_pitch_range REAL, vocal_pitch_variance REAL,
@@ -107,6 +112,9 @@ CREATE TABLE IF NOT EXISTS track_segments (
     bass_energy REAL,
     drum_energy REAL,
     spectral_centroid REAL,
+    -- v2: repeat group (A/B/C), and the two confidences kept apart on purpose --
+    -- a well-detected boundary does not make its song-function label trustworthy.
+    group_label TEXT, label_confidence REAL, boundary_confidence REAL,
     FOREIGN KEY(track_id) REFERENCES tracks(track_id)
 );
 CREATE INDEX IF NOT EXISTS idx_segments_track ON track_segments(track_id);
@@ -155,6 +163,19 @@ _MIGRATIONS: dict[str, str] = {
     "meta_source": "TEXT",
     "genre": "TEXT",
     "meta_updated_at": "TEXT",
+    "analysis_version": "TEXT",
+    "group_sequence": "TEXT",
+    "duration_ratios": "TEXT",
+    "dynamics_json": "TEXT",
+}
+
+# Same patching for the side table, keyed by table name.
+_TABLE_MIGRATIONS: dict[str, dict[str, str]] = {
+    "track_segments": {
+        "group_label": "TEXT",
+        "label_confidence": "REAL",
+        "boundary_confidence": "REAL",
+    },
 }
 
 
@@ -163,6 +184,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col, decl in _MIGRATIONS.items():
         if col not in have:
             conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
+    for table, cols in _TABLE_MIGRATIONS.items():
+        present = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, decl in cols.items():
+            if col not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
 
 

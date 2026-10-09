@@ -102,5 +102,7 @@ class Recommender:
             cands = [(r["track_id"], None) for r in repository.all_tracks(self.conn)
                      if r["track_id"] != track_id]
         recs = [self._score_pair(track_id, cand, emb) for cand, emb in cands]
-        recs.sort(key=lambda r: r.score, reverse=True)
+        # 同分时按 track_id 定序:候选来自 FAISS 的返回次序,而端口来自自己的枚举次序,
+        # 只靠"稳定排序"会让并列名次的归属变成实现细节(改造后结构分并列变多,就撞上过)。
+        recs.sort(key=lambda r: (-r.score, r.track_id))
         return recs[:limit]

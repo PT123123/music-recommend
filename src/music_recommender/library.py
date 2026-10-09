@@ -84,9 +84,12 @@ class MusicLibrary:
 
         # Incremental scan: a file whose size+mtime match the stored row is already
         # analysed, and re-decoding it is by far the most expensive thing a re-scan
-        # can do (tens of seconds per track). `force` re-analyses everything, which
-        # is what a feature-version change needs.
+        # can do (tens of seconds per track). The stored `analysis_version` must also
+        # match, or the row was produced by an older algorithm and its segments/curves
+        # are not what the current reader expects (plan 5.3). `force` re-analyses everything.
+        current_version = str(self.cfg.analysis_version)
         skipped: list[str] = []
+        stale: list[str] = []
         if force:
             todo = paths
         else:
@@ -94,12 +97,19 @@ class MusicLibrary:
             todo = []
             for p in paths:
                 sig = _safe_signature(p)
-                if sig is not None and known.get(str(Path(p).resolve())) == sig:
-                    skipped.append(p)
-                else:
+                rec = known.get(str(Path(p).resolve()))
+                if sig is None or rec is None:
                     todo.append(p)
-            if skipped:
-                log.info("skipped %d unchanged file(s), analysing %d", len(skipped), len(todo))
+                elif rec[:2] != sig:
+                    todo.append(p)
+                elif (rec[2] or "") != current_version:
+                    stale.append(p)
+                    todo.append(p)
+                else:
+                    skipped.append(p)
+            if skipped or stale:
+                log.info("skipped %d unchanged file(s), analysing %d (%d stale analysis_version)",
+                         len(skipped), len(todo), len(stale))
                 self._backfill_tags(skipped)
 
         if workers and workers > 1 and len(todo) > 1:
@@ -119,6 +129,7 @@ class MusicLibrary:
             tid = self._store(r, model)
             (ok if tid else failed).append(r[0] if r else "<analyze-failed>")
         summary = {"found": len(files), "indexed": len(ok), "skipped": len(skipped),
+                   "reanalysed_stale": len(stale),
                    "failed": len(failed), "failed_paths": failed}
         log.info("scan complete: %s", summary)
         return summary

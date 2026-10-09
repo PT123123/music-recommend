@@ -123,3 +123,8 @@ HTTP:`POST /v1/recommend/category`,body 里 `category_id` / `text` / `query`(+`h
 4. 聚类依赖 sklearn;缺失时 `status: no-sklearn`,列表退回只有预设。
 5. 参数在 `configs/config.yaml` 的 `category_system` 一处:`engine`(支持度门槛、去重)、
    `discovery`(k 范围、最小簇、命名阈值、tag 门槛)、`text`(高/低目标分位、同维度是否保留首个词)。
+6. `chorus_energy` / `chorus_repeat_count` 从本轮结构改造(ADR-20)起**可能为空**:旧实现按响度阈值几乎给每首都配
+   一个"副歌",所以这两维永远有值;现在只有在"该段属于重复组,且它自己的响度与密度分位都过门槛"时才给 `chorus`
+   标签,拿不准就是 `unknown` → 整首歌没有 chorus 时这两个键根本不写(NULL)。因此 `chorus_lift`(目标分位 0.90)
+   与预设 `流行`(`chorus_energy: 0.70`)的可排行数会**下降**,而这是正确的:以前它们是在给一个由响度阈值编出来的
+   标签排序。重新分析曲库后,结果元数据里的 `support` / `low_support` / `unscored_dims` 会如实反映还剩多少行可排。

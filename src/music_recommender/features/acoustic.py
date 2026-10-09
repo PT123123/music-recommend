@@ -10,8 +10,13 @@ import numpy as np
 SR = 44100
 
 
-def energy_features(y: np.ndarray) -> dict:
-    rms = librosa_rms(y)
+def energy_features(y: np.ndarray, rms: np.ndarray | None = None) -> dict:
+    """Loudness statistics. `rms` lets the caller pass frame RMS from a scope wider than `y`:
+    the extractor computes these numbers over the WHOLE track while `y` may be the analysis
+    window, and re-deriving RMS from the window would silently shrink `dynamic_range` to the
+    loudest 45 s."""
+    if rms is None:
+        rms = librosa_rms(y)
     n = max(1, len(rms))
     def _p(q):
         return float(np.percentile(rms, q))

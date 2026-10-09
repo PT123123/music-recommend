@@ -2,7 +2,26 @@
 
 本地音乐 MIR 特征提取与内容驱动推荐系统。按规格 Phase 1–7 逐竖切交付。
 
-## 类别发散:共享词表 + 库内聚类自动发现 + 小曲库诚实标注(本次)
+## 全曲结构与动态分析:修和弦模板 + 整曲曲线 + 重复分组(本次)
+按 `docs/MUSIC_ANALYSIS_REFACTOR_PLAN.md` 的**阶段 A + B + C** 落地,并把结果接进播放器正在播放页的时间轴。阶段 D(歌曲功能标签模型)与阶段 E(乐器/人声/和声层)本轮**未做**,第 7 节的人工标注也未做。设计理由与代价记在 `docs/ADR.md` ADR-19 至 ADR-24。
+
+- **修掉一个确定性的实现错误(ADR-21)**:`harmony.py` 里的 `MAJOR` / `MINOR` 两个 12 维常量是**音阶轮廓**(`[1,0,1,0,1,1,…]`)而不是三和弦模板,而且从没有按根音平移,于是 24 个"模板"实际只有 2 个不同向量——所谓 24 和弦匹配是在比同一个模板两次,根音比较没有意义(改造说明 2.4)。改为 `triad_profile(root_pc, third)` 逐根音平移(大三 0/4/7、小三 0/3/7),`template_check()` 自检实测 `n_distinct=24`、`min_pair_cosine=0.0`(C 与 C# 无共用音级)、`max_pair_cosine=0.6667`(C 与 Cm 共用根音与五度,即两个不同三和弦理论上能像到什么程度)。同时每步额外输出 `chord_margins`(冠军对亚军的余弦差)与 `chord_margin_mean`:margin≈0 表示这段色度和好几个三和弦一样贴合,根音并未被定下来——这是"能不能引用这条和弦序列"的核查字段。
+- **新增 `features/dynamics.py`:全曲时间戳曲线 + 事件(ADR-19)**:整段音频按 0.5 秒定长桶聚合,输出 `rms_db`(dBFS,可跨曲比)、`rms_norm`(曲内 0–1)、`onset_density`、`low_band_energy`(20–250 Hz 占比)、`spectral_brightness`、`arrangement_change`(归一化谱流)六条同轴曲线,`meta` 里写清 `scope/time_semantics/rms_db_unit/interval_seconds/n_points/confidence_kind/calibrated`。事件 `build / peak / pull-back / drop / release` 从平滑曲线的相邻窗口对比产生(下降幅度与跨度决定是 drop、release 还是 pull-back),每个都带 `evidence` 与 `confidence`,且 peak 必须由第二个特征(onset / 低频 / 亮度)共同支持,`max_peaks` 上限 3;`min_dynamic_range_db: 1.5` 让一条被母带压平的曲目直接报告"没有动态可说"而不是编出事件。**响度地板 `rms_db_floor: -80 dBFS` 修掉一个假数字**:STFT 边缘帧此前能测到 -240 dB,把动态范围虚报成 240 dB。
+- **重写 `features/structure.py`:边界 / A–B–C 重复组 / 诚实命名三分离(ADR-20)**:边界用 `find_peaks`(不是贪心 argmax——旧写法每轮都跳到 8–45 秒窗口内最强的那一处,一次很响的晚期转调会吞掉之前的所有边界,六段歌只回来两段),受 `min/max_segment_seconds` 与 `max_segments: 12` 约束,超长段**只在 novelty 高于中位处劈**,没有证据就保持一段;每边界带 `boundary_confidence`(novelty 在 p25–p98 的位置)。重复组在**三个家族**(chroma 0.60 / timbre 0.25 / density 0.15)上做加权余弦 + average linkage,`fcluster(criterion="distance")` 切;相似度要先减去本曲各段的均值、阈值 0.20,**这条初版写法在真实曲库上是退化的,修正见下面 ADR-25 那条**;**响度不进相似度矩阵**(编曲加厚的副歌还是同一段落)。命名封顶 `label_max_confidence: 0.60`,`pre_chorus` / `bridge` 不输出,其余留 `unknown`;分组只负责提出候选,段自己的响度与密度分位才决定它是不是副歌。旧实现按索引奇偶交替贴类型、无条件把首段叫 intro 末段叫 outro,这套逻辑已删除。
+- **重复分组去掉了共同模式,阈值改成数出来的(ADR-25)**:家族余弦在归一前先**减去本曲各段在该维上的均值**,只保留"这一段偏离本曲平均值的方向";某个家族在本曲段落之间完全不变就丢弃、权重摊给其余家族,三个都不变时每个段落自成一组。`group_similarity_threshold` **0.90 → 0.20**,`analysis.version` **2 → 3**(旧行的 `group_sequence` 与靠重复证据给出的 `chorus` / `verse` 标签一律判陈旧)。
+  - 为什么必须改:真实曲库 19 首(8–12 段)实测,原始余弦的成对相似度**中位 0.954–0.994、最低 0.845**——每一维都是正数,同一首歌里任意两段都像 0.95 以上,和"是否重复"无关。按 0.90 切,**16/19 首整首歌并成一个组**,正在播放页页脚只能写「重复归为 1 组」,改造说明 C.3「能指出重复片段」当时在真实音频上并不成立;cut 推到 0.95 才勉强 2.11 组、0.99 散到 5.89 组(还有一首全散开),原始余弦在任何阈值处都没有平台。
+  - 阈值 0.20 的来源:在 −0.10…+0.625(步长 0.025)网格上对 19 首重切取最稳的一格——每首平均 **3.63 组(2–6)**、最大组平均 5.47 段、**19/19 首都含 size≥3 的重复组**、0 首退化成一组也 0 首全散开,且这一步只有 **1/19** 首改答案;再高到 +0.40 后"最大组覆盖过半段落"从 10/19 掉到 3/19,同一段副歌被拆散、标签跟着丢证据。去均值后分布铺满区间(median −0.229…+0.106,max 0.718…0.996),阈值才第一次有含义。
+  - 门:`test_repeat_grouping_needs_the_common_mode_removed` 同一份构造数据跑两臂,对照臂(减均值前)断言"任何 0.00–0.98 的 cut 都切不出正确的两组",实验臂断言默认阈值切出 `ABABABAB`;把 `center` 改回 `False` 或阈值改回 0.90 都会红。合成 fixture 那条当初是靠段落差异够粗才通过的——这正是它没拦住这个 bug 的原因。
+- **`structure_features()` 现在接收并忽略 `separated`**:HPSS 的 stem 来自那 45 秒窗口,把它的水分贴到全曲段落上是把错的数字安在对的时间上;段落改报 `onset_activity`,`drum_energy` 与人声能量都不再出现(改造说明 2.3:harmonic/percussive 分解不是源分离)。
+- **`analysis_version` 成为分析载荷的缓存键(ADR-22)**:`configs/config.yaml` 新增 `analysis:` 节(当前 version **3** + 全部曲线/边界/分组/命名门槛),`utils/config.Config.analysis_version` 暴露;`tracks` 补 `analysis_version/group_sequence/duration_ratios/dynamics_json`,`track_segments` 补 `group_label/label_confidence/boundary_confidence`(旧库经 `PRAGMA table_info` + `ALTER TABLE` 直接打开)。增量扫描的跳过条件从"路径 + (size, mtime)"升级为**还要求版本一致**,不一致者计入新的 `reanalysed_stale`;`GET /v1/analysis` 对旧行返回 `stale: true` 而不是 404。
+- **推荐侧不再比 verse/chorus 字符串(ADR-23)**:`_structure_similarity()` 改成三路混合——能量轮廓 Pearson **0.45** + A/B/C 重复组序列 **0.30** + 段落时长占比累计曲线重采样 8 点 **0.25**,缺一路就把权重摊到剩下的路上;`SEQUENCE_COLS["structure"]` 从 `segment_type_sequence` 换成 `group_sequence`,`GROUP_REASON["structure"]` 改为"能量轮廓/重复方式接近"(不再声称知道副歌结构),`SPACE_COLUMNS` 补 `duration_ratios`。`bench_portability.py` 同步导出列与 `manifest.kv`(旧键 `structure_curve_blend: 0.6|0.4` 换成 `structure_parts` + `duration_profile_points`),否则 Rust 端口在比一份已不存在的定义。
+- **两个只读端点 + w-music 正在播放页时间轴(ADR-24)**:`GET /v1/tracks/{id}/analysis` 与 `GET /v1/analysis?file_path=`(播放器只有文件路径,内容哈希它算不出来)。播放器侧新增 `Controls/StructureTimelineView`(纯 C++ Canvas,96 柱位 + 14 色块池,同 `SpectrumView` 套路),段落色块按重复组取色、边界竖线透明度就是 `boundary_confidence`,每张段落卡片第三行直接摆「边界 x · 命名 x」;点时间轴或卡片即 seek。曲线只在引擎就绪或用户用过「个性推荐」页时请求,不为一张图付 5–10 秒冷启动。
+- **两端都有机器门**:`tests/test_analysis_v2.py::test_analysis_endpoints_serve_the_timeline` 把播放器读的每个键名、曲线与段落必须落在 `duration_seconds` 之内、`time_semantics == "bucket_center"` 钉成断言;反向对照已实做——把时长谎报成 28 秒(真实 30 秒)后确凿失败在 `assert (29.75 + 0.25) <= (28.0 + 1e-06)`。客户端另有临时校验器把 `ParseTimeline` 里全部 `Find("…")` 键名与真实载荷逐一比对(缺失集为空)。
+- **诚实边界**:本轮"分段是否合理"的证据来自合成 fixture(可控段落序列与响度包络)加少量人工听过的曲目,**没有标注集,因此不给准确率数字**;`analysis` 节里**分组阈值**已按真实曲库 19 首重标定(ADR-25),其余门槛(边界 prominence、命名分位、事件幅度)仍是合成数据的量级初值,换曲库后仍应按改造说明第 7 节重新标定。而且"分组数合理"是**分布意义上的**结论——阈值选在库层面最稳的一格,不等于每首都分对,单机听感核查仍未做。本机 93 首库仍是改造前分析的(`analysis_version` / `dynamics_json` 全为 NULL,`max(analyzed_at)` = 2026-09-25),播放器在此之上只显示"这首歌还是旧版分析,没有全曲响度曲线",直到用户点「分析曲库」。
+- 测试:新增 `tests/test_analysis_v2.py`(11 项:模板两两不同 + 合成 C/F/G 听回根音 + margin、曲线覆盖整曲、事件能指出 build 与 peak、平直曲目不出事件、重复分组不伪造标签、重复分组必须先减本曲均值(含原始余弦对照臂)、节拍不足时退回时间网格、全曲载荷落库、版本变更才重分析、端点契约)。
+- 回归:`.venv/Scripts/python.exe -m pytest tests -q` 全套 **64 项通过**(834.28 秒 / 13 分 54 秒,2026-10-08 夜间启动、跨午夜跑完,采集数与通过数同为 64)。分组改动只碰 `structure.py` 的内部算法与配置门槛,其余竖切(管线 / 扫描身份 / Feed / 查询等价 / 类别体系)未被带坏。
+
+## 类别发散:共享词表 + 库内聚类自动发现 + 小曲库诚实标注(上次)
 针对两条反馈——"给出的维度其实都是我自己选的,估计后续会听腻"和"曲库给得不多,小库里是否需要别的适配"——把类别从 6 条人工预设改成**三个来源共用一份词表**,并让自动类别的目标值来自曲库本身。新增 `docs/CATEGORIES.md`。
 
 - **共享词表 `recommendation/lexicon.py`(ADR-17)**:33 个可测维度、142 个中文词,是"特征列 ↔ 查询字段名 ↔ 中文词"的唯一事实源;预设类别校验、聚类命名、自由文本解析全部从它派生。`EXTRA_SPACE_COLUMNS` 也由它推导——这条改动顺手抓到一个真实缺陷:`vocal_pitch_variance` / `mid_pitch_ratio` / `spectral_flux_mean` / `crest_factor` / `chorus_energy` / `chorus_repeat_count` **六维从未被读进 Music Space**,所以任何以它们为目标的类别一直在给一个根本没加载的维度排序(新增断言 `spec.col in SPACE_COLUMNS` 守住)。
@@ -16,7 +35,7 @@
 - **去重写第一版就被自己测出来两个问题**(见 `docs/PERFORMANCE.md` 第三轮):(1) Python 三重循环让 category 从 3.8 毫秒变成 **27 / 36 毫秒**,即"去重"本身就是那 7 倍退化——改成一次堆矩阵 + 每选一首一次矩阵向量乘,回到 5.5 毫秒;(2) 存的 embedding **不是单位长度**,`v @ c` 是内积不是余弦,配置里 0.97 这个阈值比的其实是模长,现在先 L2 归一,并由 `test_dedupe_similarity_is_an_angle_not_a_magnitude`(同方向、0.4 模长的重复必须被压掉)钉住。`deduped` 的语义同时收紧为"本轮确实因冗余丢了候选",另有 `duplicates_suppressed` 给条数。
 - 依赖:聚类走 `sklearn`(已装),惰性导入,缺失时 `status: no-sklearn` 并退回纯预设。
 
-## 在线打分路径 25 倍 + 移动端可行性验证(上次)
+## 在线打分路径 25 倍 + 移动端可行性验证
 把"能不能塞进手机"变成有数字的答案:先证明查询侧还能再快一个数量级,再把整条查询路径重写一份只依赖 std 的 Rust 实现,用逐位次比对证明两边等价。
 
 - **song→song 0.55 秒 → 21.8 毫秒**(ADR-15、ADR-16):

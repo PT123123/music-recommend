@@ -92,7 +92,7 @@ def main() -> None:
     # SPACE_COLUMNS is deliberately wider: it also covers category-only percentiles and
     # tag columns that the pair-scoring path never reads.
     exported_cols = sorted({c for cols in FEATURE_GROUPS.values() for c in cols}) \
-        + list(SEQUENCE_COLS.values()) + ["track_id", "has_vocal", "energy_curve"]
+        + list(SEQUENCE_COLS.values()) + ["track_id", "has_vocal", "energy_curve", "duration_ratios"]
     score_bytes = sum(col_bytes.get(c, 0) for c in exported_cols)
     seq_bytes = sum(col_bytes.get(c, 0) for c in SEQUENCE_COLS.values())
     emb_dim = int((faiss_dir / "embedding_dimension.txt").read_text()) if (faiss_dir / "embedding_dimension.txt").exists() else 0
@@ -161,7 +161,8 @@ def export(conn, rec, out_dir: Path, ids: list[str]) -> None:
     space = MusicSpace(conn)
     embeddings = {tid: vec for _, tid, vec in repository.ordered_embeddings(conn)}
     scalar_cols = sorted({c for cols in FEATURE_GROUPS.values() for c in cols})
-    header = ["track_id", *scalar_cols, *SEQUENCE_COLS.values(), "energy_curve", "has_vocal", "embedding"]
+    header = ["track_id", *scalar_cols, *SEQUENCE_COLS.values(), "energy_curve", "duration_ratios",
+              "has_vocal", "embedding"]
     us = "\x1f"
 
     def cell(v) -> str:
@@ -174,11 +175,21 @@ def export(conn, rec, out_dir: Path, ids: list[str]) -> None:
             seqs = [us.join(str(x) for x in space._seq(row, col, tid)) for col in SEQUENCE_COLS.values()]
             fields = [tid, *(cell(row.get(c)) for c in scalar_cols), *seqs,
                       us.join(repr(float(v)) for v in space._curve(tid)),
+                      # 结构的第三路信号读段落时长占比，端侧要对齐就必须带上
+                      us.join(repr(float(v)) for v in space._ratios(tid)),
                       "1" if row.get("has_vocal") else "0",
                       us.join(f"{float(v):.9g}" for v in embeddings[tid])]
             fh.write("\t".join(fields) + "\n")
 
     groups = "|".join(f"{g}:{','.join(cols)}" for g, cols in FEATURE_GROUPS.items())
+    # 结构分有三路,导出必须说清这一份 fixtures 里哪几路真的活着:库里还是改造前的行时,
+    # `duration_ratios` 全空,两端都会把 0.25 那一权重摊到剩下两路上 —— 一致,但那条路
+    # 没有被这份 diff 检验过。把覆盖率写进 manifest,`--verify` 才会把它打印出来。
+    legs = {
+        "energy_curve": sum(1 for t in ids if len(space._curve(t)) > 1),
+        "group_sequence": sum(1 for t in ids if len(space._seq(space.rows[t], "group_sequence", t)) >= 2),
+        "duration_ratios": sum(1 for t in ids if len(space._ratios(t)) > 1),
+    }
     seq_groups = "|".join(f"{g}:{c}" for g, c in SEQUENCE_COLS.items())
     weights = "|".join(f"{g}:{v}" for g, v in rec._core.weights.items())
     kv = {
@@ -188,7 +199,12 @@ def export(conn, rec, out_dir: Path, ids: list[str]) -> None:
         "sequence_cols_by_group": seq_groups,
         "weights": weights,
         "blend_scalar_sequence": "0.5",
-        "structure_curve_blend": "0.6|0.4",
+        # 结构相似 = 0.45 全曲能量轮廓相关 + 0.30 A/B/C 重复序列相似 + 0.25 段落时长占比相关，
+        # 缺哪一路就把权重在剩下的路上重新归一（space._structure_similarity）。旧的
+        # "structure_curve_blend": "0.6|0.4" 已经不再是这个项目的算法。
+        "structure_parts": "0.45|0.30|0.25",
+        "duration_profile_points": "8",
+        "structure_legs": "|".join(f"{k}={v}/{len(ids)}" for k, v in legs.items()),
         "combined_seq_weights": "0.35|0.25|0.2|0.2",
         "ngram_n": "2",
         "limit": "20",

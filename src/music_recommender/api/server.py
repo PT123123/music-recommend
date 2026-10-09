@@ -48,7 +48,10 @@ class CategoryRequest(BaseModel):
 
 class FeedbackRequest(BaseModel):
     user_id: str = "local-user"
-    track_id: str
+    # track_id is the engine's content hash, which a client that only knows
+    # file paths cannot compute -- allow resolving it from file_path instead.
+    track_id: str | None = None
+    file_path: str | None = None
     event: str
     timestamp: float | None = None
     play_seconds: float | None = None
@@ -110,6 +113,41 @@ def create_app() -> FastAPI:
         for blob in ("mfcc_means", "mfcc_stds", "chroma_mean", "stat_vector"):
             d.pop(blob, None)
         return d
+
+    @app.get("/v1/tracks/{track_id}/analysis")
+    def get_track_analysis(track_id: str):
+        """Full-track structure + dynamics payload (refactor plan stage B/C).
+
+        A player draws the timeline and the segment cards from this one response; it never
+        has to re-derive a scale from the raw curve.
+        """
+        cfg = get_config()
+        conn = connect(cfg.db_path)
+        payload = repository.get_analysis(conn, track_id, cfg.analysis_version)
+        if payload is None:
+            raise HTTPException(404, "track not found")
+        return payload
+
+    @app.get("/v1/analysis")
+    def get_analysis_by_path(file_path: str, track_id: str | None = None):
+        """Same payload addressed by file path, for clients that only know paths.
+
+        `stale` is True when the row was produced by an older analysis_version, so the
+        player can show what it has and label it as an older pass rather than showing
+        nothing.
+        """
+        cfg = get_config()
+        conn = connect(cfg.db_path)
+        tid = track_id
+        if tid is None:
+            row = repository.get_track_by_path(conn, str(Path(file_path).resolve()))
+            if row is None:
+                raise HTTPException(404, f"file_path not indexed: {file_path}")
+            tid = row["track_id"]
+        payload = repository.get_analysis(conn, tid, cfg.analysis_version)
+        if payload is None:
+            raise HTTPException(404, "track not found")
+        return payload
 
     @app.get("/v1/categories")
     def categories(include_discovered: bool = True):
@@ -209,8 +247,19 @@ def create_app() -> FastAPI:
         valid = {"impression", "play", "skip", "like", "dislike", "complete", "replay", "partial"}
         if req.event not in valid:
             raise HTTPException(400, f"event must be one of {sorted(valid)}")
+        track_id = req.track_id
+        if track_id is None and req.file_path:
+            # Read-only lookup in the indexed library (no feature extraction):
+            # a path that was never analyzed simply has no engine identity.
+            with connect(get_config().db_path) as conn:
+                row = repository.get_track_by_path(conn, str(Path(req.file_path).resolve()))
+            if row is None:
+                raise HTTPException(404, f"file_path not indexed: {req.file_path}")
+            track_id = row["track_id"]
+        if track_id is None:
+            raise HTTPException(400, "provide track_id or file_path")
         rec = Recommender()
-        iid = rec.feedback(req.user_id, req.track_id, req.event, req.timestamp,
+        iid = rec.feedback(req.user_id, track_id, req.event, req.timestamp,
                            req.play_seconds, req.completion_ratio)
         return {"status": "ok", "interaction_id": iid}
 

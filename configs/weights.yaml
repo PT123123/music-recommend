@@ -13,7 +13,11 @@ weights:
   melody:         { value: 0.10, active: true  }   # pitch + relative interval sequence (Phase 2)
   vocal:          { value: 0.10, active: true  }   # vocal presence/intensity/pitch (Phase 2, both-vocal only)
   instrumentation: { value: 0.05, active: true }   # bass/drum energy distribution (Phase 2)
-  structure:      { value: 0.05, active: true  }   # segments / energy curve (Phase 3)
+  # structure = full-track energy contour + A/B/C repeat-group sequence + section
+  # duration profile. It deliberately ignores the verse/chorus *labels*: those are
+  # uncapped heuristics until the refactor plan's stage D model lands, and comparing
+  # them would score agreement between two guesses (plan 5.1-5.2).
+  structure:      { value: 0.05, active: true  }
   semantic:       { value: 0.05, active: false }   # high-level perception (Phase 4)
 
 # When embedding is the main signal, song->song blends FAISS recall with

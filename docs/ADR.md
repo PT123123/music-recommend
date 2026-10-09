@@ -94,3 +94,45 @@
 **理由**:第一版实现里 tag 写入不动 `analyzed_at`,回填语种后旧缓存仍会继续服务旧分位与旧簇名;而用户明确要"包括语言这些"的类别,若不做来源区分就会滑向规格 33 禁止的伪造。条件 stamp 而不是每次写都 stamp,是为了避免重复扫描同一批无 tag 的 wav 就把全库分位无谓重建。
 **实测边界**:当前 93 首全是无 tag 的 wav,所以 `语种` 查询必然返回 `no-language-tag-in-library` / 空结果 + `tag_missing.language=93`,这是事实而非缺陷;`纯音乐` 则依赖 `has_vocal`(阈值化的估计值),因此 `filter_estimated` 会把它标出来——实测该过滤返回的 9 首里有 8 首从标题看是有唱的流行曲,即估计本身在这条上不可靠,标注只是不掩盖它,修正估计另列待办。
 **代价**:两列 + 一次新旧值比较;`SPACE_COLUMNS` 多两列(仍是小标量,不影响载荷估计的打分列集合)。
+
+## ADR-19 分析范围分两层:全曲只跑廉价帧级 DSP,昂贵特征仍锁在能量最密窗口
+**决定**:`features/extract.py` 一次解码整曲拿到 `y_full` 后,`dynamics.frame_curves()` / `track_dynamics()` / `structure.structure_features()` 全部在**整段音频**上跑;`pyin`、和弦 CQT、HPSS 分解、人声/配器这些昂贵项继续只在 `_analysis_window()` 选出的窗口里算(默认 `audio.max_analysis_seconds: 45`,取滑动块能量 argmax 的连续段)。窗口起止写进 `features_json.analysis_window`,并新增 `analysis.analysis_scope: "full_track"` / `duration_seconds` / `feature_window_seconds`。`structure_features()` 现在**接收并忽略** `separated` 参数:HPSS 的 stem 来自那 45 秒,把它的水分贴到全曲段落上等于把错的数字安在对的时间;段落因此改报 `onset_activity`(打击活动代理量),不再报 `drum_energy`,也完全不报人声能量。
+**理由**:改造说明 2.2 —— 旧 `energy_curve` 描述的是那 45 秒而不是这首歌,前奏、预副歌、桥段、尾奏系统性缺席,任何"高潮在哪"的判断都被母带最响的那一段绑住。全曲这一层刻意只用帧级廉价 DSP(定长 hop 的 RMS / 20–250 Hz 频带 / 色度 / onset envelope / 谱变化),不调 HPSS、不追基频,所以增加的是"整曲一遍分帧 STFT",不是"整曲一遍 pyin"。
+**代价**:每首多跑一遍全曲 STFT(实测见 `docs/PERFORMANCE.md` 第四轮);`frame_curves` 的色度是全曲尺度,与 45 秒窗口的和弦估计从不在同一时间轴上,因此两者互不校验(结构层不读和弦序列)。
+
+## ADR-20 边界 / 重复组 / 语义标签是三个结论,各有各的置信度;规则命名封顶 0.60
+**决定**:`features/structure.py` 把三件事拆成三个字段并各自落列(`track_segments.boundary_confidence` / `group_label` / `label_confidence`),`label` 拿不准就是 `unknown`。
+1. **边界**:`_novelty()` = 相邻块的色度距离(钳非负)与其余特征绝对差均值**相加**,再做块平滑;`_boundaries()` 用 `scipy.signal.find_peaks(distance=min_segment_seconds, prominence=0.20×(p95 − median))` 取**全部**突出点。超长段只在 novelty 高于中位的地方劈一次,劈不出证据就保持一段(不为显示上限伪造边界);头部或尾部残段短于 `min_segment_seconds` 一律被吸收。边界置信度是 novelty 在 p25–p98 区间的位置,钳在 [0.05, 0.99]。
+2. **重复组**:`_assign_groups()` 在**三个家族**(chroma 0.60 / timbre 0.25 / density 0.15)上做加权余弦,每个家族**先减去本曲各段的均值**再 L2 归一(见 ADR-25;原来的"只归一、不减均值"在真实曲库上退化),再 average-linkage + `fcluster(criterion="distance")` 切,组名按首次出现编 A/B/C。**响度刻意不进相似度矩阵**——编曲加厚的副歌还是同一段落(改造说明 C.3–4 要求重复允许时间拉伸与编曲差异)。
+3. **命名**:`_label_segments()` 只在"该段属于重复组"且"段自己的响度分位与密度分位都过门槛"时给 `chorus` / `verse`;`intro` / `outro` 另要求首(末)段且又静又稀。置信度**封顶 `label_max_confidence: 0.60`**,`pre_chorus` / `bridge` 干脆不输出——重复段规则分不清 bridge 与一段异常的 verse。
+**理由**:旧实现按索引奇偶交替贴类型,并无条件把 `segment[0]` 叫 intro、`segment[-1]` 叫 outro,于是一首没有前奏的歌也会得到一串自信、内部自洽、全错的标签(改造说明 2.1)。检测到一处变化不等于这里是副歌,两段相似也不证明是同一个副歌;边界与命名分开写,是因为两者的改进路径完全不同(前者调门槛,后者要监督模型 = 阶段 D)。
+**实测边界**:命名规则里"分组只提出候选,段自己的响度/密度定夺"来自一次真实回归——按分组平均功率判时,一段与副歌同和弦但很安静的 intro 会继承 `chorus`。分组相似度最初从"一个大拼接向量做 z-score"改成"三族各自归一",是因为只有几个段落时 z-score 会把噪声维上的微小差别变成一票否决;但**这一版在真实音频上仍然是坏的**(同一首歌里任意两段的原始余弦都贴着 1,分组全体退化),最终形态与实测数字见 ADR-25。
+**代价**:界面必须把两个分数都摆出来才不构成误导(w-music 正在播放页每张段落卡片第三行就是「边界 x · 命名 x」);`unknown` 比例上升在验收里算**加分项**(改造说明 7.4)。
+
+## ADR-21 和弦模板按根音平移(24 个互不相同的三和弦),并输出 margin
+**决定**:`features/harmony.py` 原来的 `MAJOR` / `MINOR` 两个 12 维常量其实是**音阶轮廓**(`[1,0,1,0,1,1,…]`)却从不按根音平移,24 个模板里只有 2 个不同向量,所谓"根音比较"是在比同一个模板两次(改造说明 2.4)。现在改为 `triad_profile(root_pc, third)`:大三 = 0/4/7、小三 = 0/3/7,逐个根音平移;`templates()` 公开,并加 `template_check()` 自检 —— 实测 `n_distinct=24`、`min_pair_cosine=0.0`(C 与 C# 无共用音级)、`max_pair_cosine=0.6667`(C 与 Cm 共用根音与五度)。同时每个和弦在 `chord_confidences` 之外输出 `chord_margins`(冠军对亚军的余弦差)与 `chord_margin_mean`,折叠连续同名和弦时取 max。
+**理由**:margin 接近 0 意味着这段色度和好几个三和弦一样贴合,即根音根本没定下来;没有这个字段,`chord_change_rate` 与置信度都无法区分"和声在动"和"匹配本身在抖"。`max_pair_cosine` 才是"模板塌回去了"的门(塌回旧写法时它是 1.0),而它现在的理论上限 2/3 也顺带说明三和弦模板天然模糊到什么程度。
+**代价**:模板仍只认三和弦(七和弦/挂留不在此集合内),序列相似度继续走 ADR-4 的转调不变相对表示;`harmony` 分组权重保持不动——改造说明要求的是"修复之前别把旧根音序列当证据",本轮补的是可核查性,不是重估权重。
+
+## ADR-22 `analysis_version` 是分析载荷的缓存键,并参与增量扫描判定
+**决定**:`configs/config.yaml: analysis.version`(本节初值 2,现值 3——见文末与 ADR-25;全部曲线/边界/分组/命名门槛都在同一节下,`dynamics.DEFAULTS` 与 `structure.DEFAULTS` 镜像这些值以便独立调用),经 `utils/config.Config.analysis_version` 暴露。`tracks` 新增 `analysis_version` / `group_sequence` / `duration_ratios` / `dynamics_json` 四列,`track_segments` 新增 `group_label` / `label_confidence` / `boundary_confidence` 三列,都走既有 `PRAGMA table_info` + `ALTER TABLE` 补列(`_MIGRATIONS`,侧表另有 `_TABLE_MIGRATIONS`),旧库直接打开。`MusicLibrary.index(force=False)` 的跳过条件从"路径 + (size, mtime) 一致"升级为**还要求 `analysis_version` 一致**,不一致的文件进 `todo` 并在 summary 里报 `reanalysed_stale` 计数。`repository.get_analysis(conn, track_id, cfg.analysis_version)` 对旧版本行返回 `stale: True` 而不是 404,两个只读端点都带这个标记。
+**理由**:算法换了而库里仍是旧载荷时,旧形状会一直冒充新形状。ADR-13 的 (size, mtime) 只回答"文件变没变",不回答"这份分析是不是当前算法做的";而版本不一致恰恰是唯一**该**重算的情形(改造说明 5.3)。回报 `stale` 而不是拒绝,是因为播放器画一条标明"旧版算法"的曲线比空白有用,前提是它明说。
+**代价**:版本一 bump 就意味着整库重分析(93 首 6 worker 约 22 分钟量级,ADR-11/13),这必须是用户主动动作而不是播放器启动时的后台扫描。当前本机真实库 93 行 `analysis_version` 全为 NULL、`dynamics_json` 全为 NULL(`max(analyzed_at)` = 2026-09-25),即重新点「分析曲库」之前播放器只会显示"旧版分析,没有全曲响度曲线"这句说明。
+**本 ADR 自己被抓到的一次兑现**:ADR-25 把重复分组从"原始家族余弦 + 门槛 0.90"改成"去均值后的家族余弦 + 门槛 0.20"——载荷列一个没变,变的是算出来的形状,正是这里说的"同一份旧载荷冒充新算法结果"。因此 `analysis.version` 已按本 ADR 的规矩 bump 到 **3**(`extract.py` / `utils/config.py` 的 fallback 同步),旧行的 `group_sequence` 会被判 stale 并计入 `reanalysed_stale`。
+
+## ADR-23 结构相似度改三路可解释混合,不比 verse/chorus 字符串
+**决定**:`recommendation/space.py` 的 `_structure_similarity()` 混合三个独立信号,权重 **0.45 / 0.30 / 0.25**:全曲能量轮廓的 Pearson(钳到 0–1)、A/B/C 重复组序列相似度(`SEQUENCE_COLS["structure"]` 由 `segment_type_sequence` 换成 `group_sequence`)、段落**时长占比**累计曲线重采样到固定 **8 点**后的 Pearson。缺哪一路就把权重摊到剩下的路上,而不是给 0 分。`GROUP_REASON["structure"]` 文案改为"能量轮廓/重复方式接近";`SPACE_COLUMNS` 补 `duration_ratios`(JSON 列,不由分组列与序列列推出,漏了就等于时长占比永远为空)。
+**理由**:比较两首歌的 "chorus,verse,chorus" 字符串是在给两个猜测打一致性分,而猜测本身出自未封顶的规则(ADR-20,改造说明 5.1–5.2)。重复组序列、能量轮廓、段落时长占比每一个都能单独解释、也每一个都能由本地音频核查。4 段与 9 段的歌无法逐索引相关,所以时长占比取累计曲线并重采样到定点。
+**代价**:`structure` 权重仍 0.05(改造说明 5.1 要求先降权),真实收益要等人工标注集;`scripts/bench_portability.py` 的导出列与 `manifest.kv` 必须同步——已把过期的 `structure_curve_blend: "0.6|0.4"` 换成 `structure_parts: "0.45|0.30|0.25"` + `duration_profile_points: "8"`,否则 Rust 端口在比一份已经不存在的定义。
+
+## ADR-24 播放器只读一份分析载荷,且不为一条曲线冷启动引擎
+**决定**:新增 `GET /v1/analysis?file_path=`(与 `GET /v1/tracks/{id}/analysis` 同一份载荷),一次带回 `duration_seconds` + `stale` + `dynamics.{time_seconds, rms_norm, rms_db, meta}` + `segments[].{start, end, label, group, boundary_confidence, label_confidence}`;w-music 侧 `RecommendService::ParseTimeline` 只按这些名字读,`Controls/StructureTimelineView` 是纯 C++ 的 Canvas 绘制,不复制任何 MIR 算法。x 轴取「`duration_seconds` / 曲线末格右边界 / 最后一个段落末尾」三者最大值。只有引擎已就绪或 `Settings().RecommendPrewarm()` 为真才发请求,否则界面直接说明原因。
+**理由**:字段名是两端唯一的契约,改一个而不同步时界面上不会报错,只会是一张空白时间轴;所以 `tests/test_analysis_v2.py` 把键名和"曲线覆盖范围与段落末尾必须落在 `duration_seconds` 内"钉成断言,并用谎报时长(把 30 秒的歌报成 28 秒)做过反向对照——确凿失败在 `assert (29.75 + 0.25) <= (28.0 + 1e-06)`。`duration_seconds` 是容器声明的秒数,剪掉尾部静音或解码精度差异都会让它比真实音频短。冷启动 Python 要 5–10 秒,为一张从没人看的曲线付这个代价、并给没用过「个性推荐」的用户塞一个常驻进程,是不划算的。
+**代价**:`dynamics_json` 是几千个浮点,只按单曲取、播放器进程内最多缓存 40 首并整份随「分析曲库」作废;曲线只画 `rms_norm`(曲内 0–1 相对尺度),绝对 dBFS 留在服务端不进界面——播放器没有跨歌比响度的入口,摆出来只会误导。
+
+## ADR-25 重复分组必须减掉本曲各段的均值,阈值 0.20 是在真实曲库上数出来的
+**决定**:`features/structure.py` 的家族相似度抽出为 `family_similarity(x, weights, center=True)`,返回 `(sim, used)`:`center=True` 时每个家族先减去**本曲各段在该维上的均值**再逐段 L2 归一;某个家族在本曲的段落之间完全不变(`max|u| < 1e-9`)就丢弃它,把权重摊给其余家族(`sim /= used`),三个家族都不变时每个段落自成一组。`center=False` 保留原样,只作为测试的对照臂存在。`group_similarity_threshold` 由 **0.90 改为 0.20**,`configs/config.yaml: analysis.version` 由 **2 改为 3**(`extract.py` / `utils/config.py` 的缺省值同步),于是旧行的 `group_sequence` 与由它推出来的 `chorus` / `verse` 标签都会被增量扫描判为陈旧。
+**理由(实测,本机真实曲库 19 首,段落数 8–12)**:描述子的每一维都是正数(归一化色度能量、钳到 [0,1] 的音色/密度),同一首歌里**任意**两段的原始余弦都贴着 1 —— off-diagonal 中位 **0.954–0.994**,最低也有 0.845。按 0.90 切,**16/19 首整首歌并成一个组**(`AAAAAAAAAAAA`),页脚只能写「重复归为 1 组」;把 cut 推到 0.95 才勉强分出 2.11 组、推到 0.99 散到平均 5.89 组且还有一首全散开,也就是说原始余弦在任何阈值处都没有可用的平台。减去本曲均值后分布铺满整个区间(median −0.229…+0.106,max 0.718…0.996),阈值才真的有含义:共同模式(同调性、同一套乐器)本来就不携带"是否重复"的信息,段与段*偏离各自均值*的方向才是。
+**阈值怎么定的**:在 −0.10…+0.625(步长 0.025)的网格上对 19 首逐一重切,看分组数与稳定度。**+0.20** 处每首平均 **3.63 组(2–6)**、最大组平均 5.47 段、**19/19 首都有 size≥3 的重复组**、0 首退化成一组也 0 首全散开,而且这一步只有 **1/19** 首的答案发生变化(全网格最稳的几格之一)。再往上到 +0.40 之后"最大组覆盖过半段落"从 10/19 掉到 3/19、+0.375 起每步 7 首改答案,同一段副歌被拆散,标签也就跟着丢重复证据。
+**门与对照**:`tests/test_analysis_v2.py::test_repeat_grouping_needs_the_common_mode_removed` 用同一份构造数据跑两臂——对照臂断言原始余弦的成对相似度全挤在 0.05 宽的带里、且在 0.00–0.98 的**任何** cut 都切不出正确的两组划分,实验臂断言默认阈值切出 `ABABABAB`;把 `center` 改回 `False` 或把阈值改回 0.90,这条测试就会红。合成 fixture 那条(`test_structure_groups_repeats_without_inventing_labels`)当初是靠段落差异够粗才通过的,这正是它没拦住这个 bug 的原因——所以现在阈值与退化判定都以真实曲库为准。
+**代价**:看到新分组必须重跑「分析曲库」(93 首 6 worker 约 22 分钟量级,ADR-11/13),本机库当前 93 行 `analysis_version` 仍全为 NULL、`max(analyzed_at)` = 2026-09-25。推荐侧无需改动:端口读的是存储的 `group_sequence` 字符串,分组算法变化不改变打分定义,但重算后的 `group_sequence` 会让结构分的第三路取值变化(ADR-23),`docs/PORTING.md` 那份等价性证据要在重分析后重跑一次 `--verify` 才算覆盖新数据。

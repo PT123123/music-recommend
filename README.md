@@ -230,6 +230,8 @@ python -m pytest tests/test_pipeline.py -q        # 管线 / embedding / FAISS /
 python -m pytest tests/test_scan_identity.py -q   # 扫描身份 / tag 读取 / 增量跳过 / 序列预算 / DSP 去重
 python -m pytest tests/test_feed.py -q            # Feed 时间衰减 + 差分喜欢偏好
 python -m pytest tests/test_query_perf.py -q      # 查询路径等价性:朴素参考实现逐位比对(rapidfuzz / 分组相似度 / MMR / 冷启动)
+python -m pytest tests/test_analysis_v2.py -q     # 全曲分析:和弦模板 / 整曲曲线与事件 / 边界与 A-B-C 重复分组(含反向对照)/ 端点契约
+python -m pytest tests -q                        # 全套回归:当前 64 项,约 14 分钟(真实 DSP 的管线与扫描测试是大头)
 ```
 
 ## 性能与可移植性
@@ -240,8 +242,8 @@ python -m pytest tests/test_query_perf.py -q      # 查询路径等价性:朴素
 |---|---|
 | song→song / category / feed_next | **21.8 ms**(负载下复测 29.5 ms)/ 5.5 ms / 3.3 ms |
 | 类别自动发现 | 93 首 34 维、k=4..12 全扫 **0.55 秒,每个库版本一次**(之后 0 成本) |
-| 离线抽取 | 43.1 秒/首(单进程,`pyin` 28.7 + `hpss` 5.9 占 80%);93 首 6 worker ≈ 22 分钟;重扫未变更曲库 0 秒 |
-| 打分载荷 | **1560 字节/首** + embedding 96 字节(整行 11,231 字节,其余是抽取中间量,查询不读)→ 5000 首约 8.3 MB |
+| 离线抽取 | 43.1 秒/首(单进程,`pyin` 28.7 + `hpss` 5.9 占 80%);93 首 6 worker ≈ 22 分钟;重扫未变更曲库 0 秒。分范围实测(第四轮):**廉价全曲层 3.8–7.5 秒/首**,昂贵 45 秒窗口是它的 4.9–8.5 倍,所以全曲曲线与分段只加了一到两成 |
+| 打分载荷 | **1508 字节/首** + embedding 96 字节(整行 11,231 字节,其余是抽取中间量,查询不读)→ 5000 首约 8.0 MB |
 
 关于"能不能塞进手机":**在线打分路径已用 std-only Rust 重写并验证与 Python 排名逐位一致**(12 seed × 20 位次 = 240 slot,0 处顺序不一致、分数差 0,Rust 6.1 ms/查询);命令内置**反向对照**,故意改坏一个权重必须被抓出,否则判定不成立。**离线抽取不搬手机**——那是 librosa 的算法成本,不是语言成本。手机形态 = 桌面抽取、设备只查询。完整论证、边界与移植清单见 `docs/PORTING.md`。
 

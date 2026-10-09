@@ -198,7 +198,7 @@ def test_scan_state_only_counts_completed_rows(tmp_path):
                  "VALUES ('b','/b',20,2.0, x'0000')")
     conn.commit()
     # a row without features (crashed mid-pipeline) must be re-analysed, not skipped
-    assert repository.scan_state(conn) == {"/b": (20, 2.0)}
+    assert repository.scan_state(conn) == {"/b": (20, 2.0, None)}
 
 
 # ---- extraction cost / dedup ----

@@ -31,6 +31,9 @@ class Config:
     audio: dict = field(default_factory=dict)
     paths: dict = field(default_factory=dict)
     features: dict = field(default_factory=dict)
+    # Full-track structure/dynamics knobs, incl. `version` -- the cache key that decides
+    # whether a stored analysis payload is still current (see library/repository).
+    analysis: dict = field(default_factory=dict)
     embedding: dict = field(default_factory=dict)
     vector_store: dict = field(default_factory=dict)
     retrieval: dict = field(default_factory=dict)
@@ -51,6 +54,11 @@ class Config:
     @property
     def db_path(self) -> Path:
         return self.abs(self.paths["db_file"])
+
+    @property
+    def analysis_version(self) -> int:
+        """Current analysis payload version; a stored row with a different one is stale."""
+        return int(self.analysis.get("version", 3))
 
     @property
     def faiss_dir(self) -> Path:
@@ -92,6 +100,7 @@ def get_config() -> Config:
         audio=cfg.get("audio", {}),
         paths=cfg.get("paths", {}),
         features=cfg.get("features", {}),
+        analysis=cfg.get("analysis", {}),
         embedding=cfg.get("embedding", {}),
         vector_store=cfg.get("vector_store", {}),
         retrieval=cfg.get("retrieval", {}),

@@ -53,22 +53,79 @@ def _ref_combined(a: list, b: list) -> float:
                  + 0.2 * jaccard_similarity(a, b) + 0.2 * transition_similarity(a, b))
 
 
+def _ref_duration_profile(ratios, n=8):
+    """Textbook resampling of the cumulative section-duration curve (no np.interp).
+
+    Doubles as the spec for the fast path's helper: fixed output length is what lets a
+    3-segment song be compared with a 9-segment one at all.
+    """
+    vals = [float(r) for r in (ratios or []) if isinstance(r, (int, float)) and float(r) > 0]
+    if len(vals) < 2:
+        return None
+    total = sum(vals)
+    if total <= 0:
+        return None
+    cum, acc = [], 0.0
+    for v in vals:
+        acc += v
+        cum.append(acc / total)
+    x = [(i + 1) / len(cum) for i in range(len(cum))]
+    out = []
+    for k in range(n):
+        t = (k + 1) / n
+        if t <= x[0]:
+            out.append(cum[0])
+            continue
+        if t >= x[-1]:
+            out.append(cum[-1])
+            continue
+        for i in range(1, len(x)):
+            if t <= x[i]:
+                frac = (t - x[i - 1]) / (x[i] - x[i - 1])
+                out.append(cum[i - 1] + frac * (cum[i] - cum[i - 1]))
+                break
+    return np.asarray(out, float)
+
+
+def _ref_correlation_sim(va, vb):
+    """(corr + 1) / 2, or None when either curve is flat -- the fast path skips the part."""
+    if len(va) != len(vb) or len(va) <= 1 or not any(va) or not any(vb):
+        return None
+    if float(np.std(va)) <= 0 or float(np.std(vb)) <= 0:
+        return None
+    return float(np.clip((float(np.corrcoef(va, vb)[0, 1]) + 1) / 2, 0.0, 1.0))
+
+
 def _ref_group_similarity(rows: dict, sorted_vals: dict, a_id: str, b_id: str, group: str):
     """Music Space before the precompute: searchsorted per pair, DP edit distance."""
     from music_recommender.recommendation.space import FEATURE_GROUPS, SEQUENCE_COLS
     if group == "structure":
+        # Three independent signals, renormalized over whichever exist (plan 5.2). The
+        # semantic labels are deliberately absent: an uncalibrated "chorus" is a guess.
         ra, rb = rows[a_id], rows[b_id]
-        sa = [x for x in str(ra["segment_type_sequence"] or "").split(",") if x]
-        sb = [x for x in str(rb["segment_type_sequence"] or "").split(",") if x]
-        seq_sim = _ref_combined(sa, sb) if len(sa) >= 2 and len(sb) >= 2 else None
+        parts = []
+
         ca = json.loads(ra["energy_curve"]) if ra["energy_curve"] else []
         cb = json.loads(rb["energy_curve"]) if rb["energy_curve"] else []
-        if len(ca) == len(cb) and len(ca) > 1 and any(ca) and any(cb):
-            va, vb = np.asarray(ca, float), np.asarray(cb, float)
-            corr = float(np.corrcoef(va, vb)[0, 1]) if va.std() > 0 and vb.std() > 0 else 0.0
-            curve = float(np.clip((corr + 1) / 2, 0.0, 1.0))
-            return curve if seq_sim is None else float(np.clip(0.6 * curve + 0.4 * seq_sim, 0.0, 1.0))
-        return seq_sim
+        curve = _ref_correlation_sim([float(v) for v in ca], [float(v) for v in cb])
+        if curve is not None:
+            parts.append((0.45, curve))
+
+        sa = [x for x in str(ra["group_sequence"] or "").split(",") if x]
+        sb = [x for x in str(rb["group_sequence"] or "").split(",") if x]
+        if len(sa) >= 2 and len(sb) >= 2:
+            parts.append((0.30, _ref_combined(sa, sb)))
+
+        pa = _ref_duration_profile(json.loads(ra["duration_ratios"]) if ra["duration_ratios"] else [])
+        pb = _ref_duration_profile(json.loads(rb["duration_ratios"]) if rb["duration_ratios"] else [])
+        if pa is not None and pb is not None:
+            profile = _ref_correlation_sim(list(pa), list(pb))
+            if profile is not None:
+                parts.append((0.25, profile))
+
+        if not parts:
+            return None
+        return float(np.clip(sum(w * s for w, s in parts) / sum(w for w, _ in parts), 0.0, 1.0))
 
     cols = FEATURE_GROUPS.get(group) or []
     if group == "vocal" and not (rows[a_id]["has_vocal"] and rows[b_id]["has_vocal"]):
